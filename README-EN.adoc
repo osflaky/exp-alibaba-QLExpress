@@ -1,0 +1,2033 @@
+:toc:
+
+= QLExpress
+
+image::images/logo.png[]
+
+link:README.adoc[【中文版】] | [English]
+
+image::https://api.star-history.com/svg?repos=alibaba/QLExpress&type=Date[Star History Chart]
+
+== Background Introduction
+
+QLExpress is an embedded Java dynamic scripting tool evolved from Alibaba's e-commerce business rules. It has strong influence within Alibaba Group, and was open-sourced in 2012 to continuously optimize itself and promote the spirit of open source contribution.
+
+Based on basic expression calculation, it has the following features:
+
+* Flexible customization capabilities - through Java API custom functions and operators, you can quickly implement business rule DSLs
+* Compatible with the latest Java syntax, making it easy for Java programmers to get familiar quickly. Business personnel familiar with C-like languages will also find it very convenient to use
+* Native JSON support for quickly defining complex data structures
+* Friendly error reporting - whether compilation or runtime errors, it can precisely and friendly indicate error locations
+* Unique expression tracing functionality that can trace the calculated values at intermediate nodes of expressions, helping business personnel or AI perform root cause analysis of online rule calculation results
+* Secure by default - scripts are not allowed to interact with application code by default, but if interaction is needed, you can also define secure interaction methods yourself
+* Interpreted execution, doesn't occupy JVM metaspace, can enable caching to improve interpretation performance
+* Lightweight code with minimal dependencies, suitable for all Java runtime environments
+
+QLExpress4, as the latest evolution of QLExpress, rewrote the parsing engine based on Antlr4, further enhancing the original advantages and fully embracing functional programming, with further improvements in both performance and expressive power.
+
+Usage scenarios:
+
+* E-commerce coupon rule configuration: Quickly implement coupon rule DSLs through QLExpress custom functions and operators, allowing operations personnel to dynamically configure according to requirements
+* Form building control association rule configuration: Form building platforms allow users to drag and drop controls to build custom forms, using QLExpress scripts to configure associations between different controls
+* Workflow engine condition rule configuration
+* Advertising system billing rule configuration
+
+\...\...
+
+== New Version Features
+
+The new version is not a simple functional refactoring of the old version, but our exploration of the next generation rule expression engine based on insights into user needs. It has many very practical but missing important features in other engines.
+
+=== Expression Calculation Tracing
+
+After business personnel complete rule script configuration, it's difficult to perceive their online execution situation. For example, in e-commerce promotion rules requiring users to satisfy the rule `isVip && not logged in for more than 10 days`. How many online users are blocked by the vip condition, and how many users are blocked by the login condition? This is just a simple rule with only two conditions, but the actual online situation is much more complex.
+
+Tracing online rule execution not only helps business personnel understand the actual online situation and troubleshoot and fix problems, but the accumulated data is also very valuable and can be used for subsequent rule optimization and business decisions. Below is a simplified product diagram of a rule platform performing root cause analysis and annotation decisions on rules based on QLExpress4's expression tracing capability:
+
+image::images/order_rules_cn.png[]
+
+The principle of root cause analysis lies in using QLExpress4's expression tracing capability to obtain the value of each intermediate result during expression calculation, and accordingly determine the cause of the final execution result.
+
+For specific usage methods, refer to: link:#expression-calculation-tracing-1[Expression Calculation Tracing]
+
+=== Native JSON Syntax Support
+
+QLExpress4 natively supports JSON syntax and can quickly define complex data structures.
+
+JSON arrays represent lists (List), while JSON objects represent mappings (Map), and complex objects can also be directly defined.
+
+Products can implement JSON mapping rules based on this feature, allowing users to conveniently define mapping relationships from one model to another. Below is a simplified product diagram of a rule platform implementing model mapping based on this capability:
+
+image::images/json_map.png[]
+
+For specific usage methods, refer to: link:#convenient-syntax-elements[Convenient Syntax Elements]
+
+=== Convenient String Processing
+
+QLExpress4 has targeted enhancements to string processing capabilities, allowing expressions to be directly embedded in strings through `$\{expression}`.
+
+For specific usage methods, refer to: link:#dynamic-strings[Dynamic Strings]
+
+=== Attachment Pass-through
+
+Normally, all information needed for script execution is in the `context`. Keys in the context can be referenced as variables in scripts and ultimately passed to custom functions or operators.
+
+However, for security or convenience reasons, some information is not wanted to be referenced by users through variables, such as tenant names, passwords, etc.
+
+At this time, this information can be passed to custom functions or operators through attachments.
+
+For specific usage methods, refer to: link:#adding-custom-functions-and-operators[Adding Custom Functions and Operators], where the `hello` custom function returns different welcome messages according to different tenants in the attachment.
+
+=== Functional Programming
+
+Functions are elevated to first-class citizens in QLExpress4, can be used as variables, and can also be returned as function return values. They can also be easily combined with common functional APIs in Java (such as Stream).
+
+Here's a simple QLExpress example script:
+
+[source,java]
+----
+add = (a, b) -> {
+  return a + b;
+};
+i = add(1,2);
+assert(i == 3);
+----
+
+For more usage methods, refer to:
+
+* link:#lambda-expressions[Lambda Expressions]
+* link:#list-filtering-and-mapping[List Filtering and Mapping]
+* link:#stream-api[Stream API]
+* link:#functional-interfaces[Functional Interfaces]
+
+=== Semicolon Simplification
+
+QLExpress4 supports omitting semicolons, making expressions more concise. For details, refer to link:#semicolons[Semicolons]
+
+== API Quick Start
+
+=== Adding Dependencies
+
+[source,xml,subs="attributes+"]
+----
+<dependency>
+    <groupId>com.alibaba</groupId>
+    <artifactId>qlexpress4</artifactId>
+    <version>4.1.3</version>
+</dependency>
+----
+
+Requirements
+
+* JDK 8 or higher
+
+
+=== First QLExpress Program
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        Map<String, Object> context = new HashMap<>();
+        context.put("a", 1);
+        context.put("b", 2);
+        context.put("c", 3);
+        Object result = express4Runner.execute("a + b * c", context, QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals(7, result);
+----
+
+More expression execution methods can be found in the documentation link:docs/execute-en.adoc[Expression Execution]
+
+=== Adding Custom Functions and Operators
+
+The simplest way is to quickly define function/operator logic through Java Lambda expressions:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        // custom function
+        express4Runner.addVarArgsFunction("join",
+            params -> Arrays.stream(params).map(Object::toString).collect(Collectors.joining(",")));
+        Object resultFunction =
+            express4Runner.execute("join(1,2,3)", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals("1,2,3", resultFunction);
+        
+        // custom operator
+        express4Runner.addOperatorBiFunction("join", (left, right) -> left + "," + right);
+        Object resultOperator =
+            express4Runner.execute("1 join 2 join 3", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals("1,2,3", resultOperator);
+----
+
+If the logic of custom functions is complex, or you need to obtain script context information, you can also implement it by inheriting `CustomFunction`.
+
+For example, the following `hello` custom function returns different welcome messages according to different tenants:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.test.function;
+
+import com.alibaba.qlexpress4.runtime.Parameters;
+import com.alibaba.qlexpress4.runtime.QContext;
+import com.alibaba.qlexpress4.runtime.function.CustomFunction;
+
+public class HelloFunction implements CustomFunction {
+    @Override
+    public Object call(QContext qContext, Parameters parameters)
+        throws Throwable {
+        String tenant = (String)qContext.attachment().get("tenant");
+        return "hello," + tenant;
+    }
+}
+----
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        express4Runner.addFunction("hello", new HelloFunction());
+        String resultJack = (String)express4Runner.execute("hello()",
+            Collections.emptyMap(),
+            // Additional information(tenant for example) can be brought into the custom function from outside via attachments
+            QLOptions.builder().attachments(Collections.singletonMap("tenant", "jack")).build()).getResult();
+        assertEquals("hello,jack", resultJack);
+        String resultLucy =
+            (String)express4Runner
+                .execute("hello()",
+                    Collections.emptyMap(),
+                    QLOptions.builder().attachments(Collections.singletonMap("tenant", "lucy")).build())
+                .getResult();
+        assertEquals("hello,lucy", resultLucy);
+----
+
+QLExpress4 also supports adding custom functions through QLExpress scripts. Note that variables defined outside of functions (such as defineTime in the example) are initialized when the function is defined and will not be recalculated when the function is subsequently called.
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner =
+            new Express4Runner(InitOptions.builder().securityStrategy(QLSecurityStrategy.open()).build());
+        BatchAddFunctionResult addResult = express4Runner.addFunctionsDefinedInScript(
+            "function myAdd(a,b) {\n" + "    return a+b;" + "}\n" + "\n" + "function getCurrentTime() {\n"
+                + "    return System.currentTimeMillis();\n" + "}" + "\n" + "defineTime=System.currentTimeMillis();\n"
+                + "function defineTime() {\n" + "    return defineTime;" + "}\n",
+            ExpressContext.EMPTY_CONTEXT,
+            QLOptions.DEFAULT_OPTIONS);
+        assertEquals(3, addResult.getSucc().size());
+        QLResult result = express4Runner.execute("myAdd(1,2)", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        assertEquals(3, result.getResult());
+        
+        QLResult resultCurTime1 =
+            express4Runner.execute("getCurrentTime()", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        Thread.sleep(1000);
+        QLResult resultCurTime2 =
+            express4Runner.execute("getCurrentTime()", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        assertNotSame(resultCurTime1.getResult(), resultCurTime2.getResult());
+        
+        /*
+         * The defineTime variable is defined outside the function and is initialized when the function is defined;
+         * it is not recalculated afterward, so the value returned is always the time at which the function was defined.
+         */
+        QLResult resultDefineTime1 =
+            express4Runner.execute("defineTime()", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        Thread.sleep(1000);
+        QLResult resultDefineTime2 =
+            express4Runner.execute("defineTime()", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        assertSame(resultDefineTime1.getResult(), resultDefineTime2.getResult());
+----
+
+It is recommended to use Java to define custom functions as much as possible, as this can provide better performance and stability.
+
+==== Lazy Argument Evaluation (LazyArgCustomFunction)
+
+By default, QLExpress evaluates all arguments before calling a function. If evaluating an argument causes side effects (such as a division-by-zero error), the error is triggered even if the function logic does not need that argument.
+
+Functions that implement the `LazyArgCustomFunction` interface control when arguments are evaluated. By default, the compiler wraps each argument as a `QLambda`, this behavior can be customized by overriding `isLazyArg(int argIndex)`, and the function manually triggers evaluation by calling `QLambda.get()`, enabling short-circuit evaluation semantics.
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        express4Runner.addFunction("IF", new LazyArgCustomFunction() {
+            private static final int PARAM_LENGTH = 3;
+            
+            @Override
+            public boolean isLazyArg(int argIndex) {
+                return 1 == argIndex || 2 == argIndex;
+            }
+            
+            @Override
+            public Object call(QContext qContext, Parameters parameters) {
+                if (parameters == null || parameters.size() != PARAM_LENGTH) {
+                    throw new IllegalArgumentException("Invalid number of arguments");
+                }
+                Object v1 = call(parameters.getValue(0));
+                if (!(v1 instanceof Boolean)) {
+                    throw new IllegalArgumentException("Argument 1 must be a boolean");
+                }
+                if ((Boolean)v1) {
+                    return call(parameters.getValue(1));
+                }
+                
+                return call(parameters.getValue(2));
+            }
+            
+            private Object call(Object obj) {
+                if (obj instanceof QLambda) {
+                    return ((QLambda)obj).get();
+                }
+                return obj;
+            }
+        });
+----
+
+In the example above, when `b == 0` is true, the third argument `a / b` is never evaluated, so no division-by-zero exception is thrown.
+
+For more ways to customize syntax elements, see the documentation link:docs/custom-item-en.adoc[Custom Syntax Elements].
+
+=== Validating Syntax Correctness
+
+To validate syntax correctness without executing scripts, including operator restriction validation: call `check` and catch exceptions. If `QLSyntaxException` is caught, it indicates syntax errors exist.
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        try {
+            express4Runner.check("a+b;\n(a+b");
+            fail();
+        }
+        catch (QLSyntaxException e) {
+            assertEquals(2, e.getLineNo());
+            assertEquals(5, e.getColNo());
+            assertEquals("SYNTAX_ERROR", e.getErrorCode());
+            // <EOF> represents the end of script
+            assertEquals(
+                "[Error SYNTAX_ERROR: mismatched input '<EOF>' expecting ')']\n" + "[Near: a+b; (a+b<EOF>]\n"
+                    + "                ^^^^^\n" + "[Line: 2, Column: 5]",
+                e.getMessage());
+        }
+----
+
+You can use `CheckOptions` to configure more fine-grained syntax validation rules, supporting the following two options:
+
+1. `operatorCheckStrategy`: Operator validation strategy, used to restrict which operators can be used in the script
+2. `disableFunctionCalls`: Whether to disable function calls, default is false
+
+Example 1: Using Operator Validation Strategy (Whitelist)
+
+[source,java,indent=0]
+----
+        // Create a whitelist of allowed operators
+        Set<String> allowedOps = new HashSet<>(Arrays.asList("+", "*"));
+        
+        // Configure check options with operator whitelist
+        CheckOptions checkOptions =
+            CheckOptions.builder().operatorCheckStrategy(OperatorCheckStrategy.whitelist(allowedOps)).build();
+        
+        // Create runner and check script with custom options
+        Express4Runner runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        runner.check("a + b * c", checkOptions); // This will pass as + and * are allowed
+----
+
+Example 2: Disabling Function Calls
+
+[source,java,indent=0]
+----
+        // Create a runner
+        Express4Runner runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        
+        // Create options with function calls disabled
+        CheckOptions options = CheckOptions.builder().disableFunctionCalls(true).build();
+        
+        // Script with function call
+        String scriptWithFunctionCall = "Math.max(1, 2)";
+        
+        // Use custom options to check script
+        try {
+            runner.check(scriptWithFunctionCall, options);
+        }
+        catch (QLSyntaxException e) {
+            // Will throw exception as function calls are disabled
+        }
+----
+
+=== Parsing External Variables Required by Scripts
+
+Some variables used in scripts are generated within the script, while others need to be passed in from outside through `context`.
+
+QLExpress4 provides a method to parse all variables that need to be passed in from outside in the script:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        Set<String> outVarNames =
+            express4Runner.getOutVarNames("int a = 1, b = 10;\n" + "c = 11\n" + "e = a + b + c + d\n" + "f+e");
+        Set<String> expectSet = new HashSet<>();
+        expectSet.add("d");
+        expectSet.add("f");
+        assertEquals(expectSet, outVarNames);
+----
+
+More script-dependency parsing tools:
+
+* `getOutFunctions` – parses all functions that must be defined externally
+* `getOutVarAttrs` – parses all variables (and the attributes they reference) that must be supplied from outside; an enhanced version of `getOutVarNames`
+
+=== High-Precision Calculation
+
+QLExpress internally uses BigDecimal to represent all numbers that cannot be precisely represented by double, to represent calculation precision as much as possible:
+
+> Example: 0.1 cannot be precisely represented in double
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        Object result = express4Runner.execute("0.1", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS).getResult();
+        assertTrue(result instanceof BigDecimal);
+----
+
+This approach can solve some calculation precision problems:
+
+For example, 0.1+0.2 is not equal to 0.3 in Java due to precision issues.
+QLExpress can automatically identify that 0.1 and 0.2 cannot be precisely represented by double precision, and change to use BigDecimal representation to ensure the result equals 0.3
+
+[source,java,indent=0]
+----
+        assertNotEquals(0.3, 0.1 + 0.2, 0.0);
+        assertTrue((Boolean)express4Runner.execute("0.3==0.1+0.2", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS)
+            .getResult());
+----
+
+In addition to the default precision guarantee, there's also a `precise` switch. When turned on, all calculations use BigDecimal to prevent problems caused by low-precision numbers passed in from outside:
+
+[source,java,indent=0]
+----
+        Map<String, Object> context = new HashMap<>();
+        context.put("a", 0.1);
+        context.put("b", 0.2);
+        assertFalse((Boolean)express4Runner.execute("0.3==a+b", context, QLOptions.DEFAULT_OPTIONS).getResult());
+        // open precise switch
+        assertTrue((Boolean)express4Runner.execute("0.3==a+b", context, QLOptions.builder().precise(true).build())
+            .getResult());
+----
+
+=== Security Strategy
+
+QLExpress4 adopts isolation security strategy by default, not allowing scripts to access Java object fields and methods, which ensures script execution security. If you need to access Java objects, you can configure through different security strategies.
+
+Assuming the application has the following Java class:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.inport;
+
+/**
+ * Author: DQinYuan
+ */
+public class MyDesk {
+    
+    private String book1;
+    
+    private String book2;
+    
+    public String getBook1() {
+        return book1;
+    }
+    
+    public void setBook1(String book1) {
+        this.book1 = book1;
+    }
+    
+    public String getBook2() {
+        return book2;
+    }
+    
+    public void setBook2(String book2) {
+        this.book2 = book2;
+    }
+}
+----
+
+The script execution context is set as follows:
+
+[source,java,indent=0]
+----
+        MyDesk desk = new MyDesk();
+        desk.setBook1("Thinking in Java");
+        desk.setBook2("Effective Java");
+        Map<String, Object> context = Collections.singletonMap("desk", desk);
+----
+
+QLExpress4 provides four security strategies:
+
+==== 1. Isolation Strategy (Default)
+
+By default, QLExpress4 adopts isolation strategy, not allowing access to any fields and methods:
+
+[source,java,indent=0]
+----
+        // default isolation strategy, no field or method can be found
+        Express4Runner express4RunnerIsolation = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        assertErrorCode(express4RunnerIsolation, context, "desk.book1", "FIELD_NOT_FOUND");
+        assertErrorCode(express4RunnerIsolation, context, "desk.getBook2()", "METHOD_NOT_FOUND");
+----
+
+==== 2. Blacklist Strategy
+
+Through blacklist strategy, you can prohibit access to specific fields or methods, while other fields and methods can be accessed normally:
+
+[source,java,indent=0]
+----
+        // black list security strategy
+        Set<Member> memberList = new HashSet<>();
+        memberList.add(MyDesk.class.getMethod("getBook2"));
+        Express4Runner express4RunnerBlackList = new Express4Runner(
+            InitOptions.builder().securityStrategy(QLSecurityStrategy.blackList(memberList)).build());
+        assertErrorCode(express4RunnerBlackList, context, "desk.book2", "FIELD_NOT_FOUND");
+        Object resultBlack =
+            express4RunnerBlackList.execute("desk.book1", context, QLOptions.DEFAULT_OPTIONS).getResult();
+        Assert.assertEquals("Thinking in Java", resultBlack);
+----
+
+==== 3. Whitelist Strategy
+
+Through whitelist strategy, only specified fields or methods are allowed to be accessed, while other fields and methods are prohibited:
+
+[source,java,indent=0]
+----
+        // white list security strategy
+        Express4Runner express4RunnerWhiteList = new Express4Runner(
+            InitOptions.builder().securityStrategy(QLSecurityStrategy.whiteList(memberList)).build());
+        Object resultWhite =
+            express4RunnerWhiteList.execute("desk.getBook2()", context, QLOptions.DEFAULT_OPTIONS).getResult();
+        Assert.assertEquals("Effective Java", resultWhite);
+        assertErrorCode(express4RunnerWhiteList, context, "desk.getBook1()", "METHOD_NOT_FOUND");
+----
+
+==== 4. Open Strategy
+
+Open strategy allows access to all fields and methods, similar to QLExpress3 behavior, but security risks need to be noted:
+
+[source,java,indent=0]
+----
+        // open security strategy
+        Express4Runner express4RunnerOpen =
+            new Express4Runner(InitOptions.builder().securityStrategy(QLSecurityStrategy.open()).build());
+        Assert.assertEquals("Thinking in Java",
+            express4RunnerOpen.execute("desk.book1", context, QLOptions.DEFAULT_OPTIONS).getResult());
+        Assert.assertEquals("Effective Java",
+            express4RunnerOpen.execute("desk.getBook2()", context, QLOptions.DEFAULT_OPTIONS).getResult());
+----
+
+> Note: While open strategy provides maximum flexibility, it also brings security risks. It's recommended to use only in trusted environments and not recommended for processing end-user input scripts.
+
+==== Strategy Recommendations
+
+It's recommended to directly adopt the default strategy and not directly call Java object fields and methods in scripts. Instead, provide system functionality to embedded scripts through custom functions and operators (refer to link:#adding-custom-functions-and-operators[Adding Custom Functions and Operators]). This can ensure both script security and flexibility, with better user experience.
+
+If you do need to call Java object fields and methods, at least use whitelist strategy to provide limited access permissions to scripts.
+
+As for blacklist and open strategies, they're not recommended for external input script scenarios unless you ensure each script will be reviewed.
+
+=== Calling Java Classes in Applications
+
+> Requires relaxing security strategy, not recommended for end-user input
+
+Assuming the application has the following Java class (`com.alibaba.qlexpress4.QLImportTester`):
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4;
+
+public class QLImportTester {
+    
+    public static int add(int a, int b) {
+        return a + b;
+    }
+    
+}
+----
+
+In QLExpress, there are two calling methods.
+
+==== 1. Using `import` Statement in Scripts to Import Classes and Use
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.builder()
+            // open security strategy, which allows access to all Java classes within the application.
+            .securityStrategy(QLSecurityStrategy.open())
+            .build());
+        // Import Java classes using the import statement.
+        Map<String, Object> params = new HashMap<>();
+        params.put("a", 1);
+        params.put("b", 2);
+        Object result =
+            express4Runner
+                .execute("import com.alibaba.qlexpress4.QLImportTester;" + "QLImportTester.add(a,b)",
+                    params,
+                    QLOptions.DEFAULT_OPTIONS)
+                .getResult();
+        Assert.assertEquals(3, result);
+----
+
+==== 2. Default Import When Creating `Express4Runner`, No Additional `import` Statement Needed in Scripts
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.builder()
+            .addDefaultImport(
+                Collections.singletonList(ImportManager.importCls("com.alibaba.qlexpress4.QLImportTester")))
+            .securityStrategy(QLSecurityStrategy.open())
+            .build());
+        Object result =
+            express4Runner.execute("QLImportTester.add(1,2)", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS)
+                .getResult();
+        Assert.assertEquals(3, result);
+----
+
+In addition to using `ImportManager.importCls` to import individual classes, there are other more convenient import methods:
+
+ * `ImportManager.importPack` directly imports all classes under a package path, such as `ImportManager.importPack("java.util")` will import all classes under the `java.util` package. QLExpress defaults to importing the following packages:
+ ** `ImportManager.importPack("java.lang")`
+ ** `ImportManager.importPack("java.util")`
+ ** `ImportManager.importPack("java.math")`
+ ** `ImportManager.importPack("java.util.stream")`
+ ** `ImportManager.importPack("java.util.function")`
+ * `ImportManager.importInnerCls` imports all inner classes in a given class path
+ * `ImportManager.importClsAlias` assigns an alias to a class, **particularly suitable for code obfuscation scenarios**. This method directly uses the passed Class object instead of loading by class name, which avoids class name obfuscation after compilation
+
+[source,java,indent=0]
+----
+        InitOptions initOptions = InitOptions.builder()
+            .securityStrategy(QLSecurityStrategy.open())
+            .addDefaultImport(Arrays.asList(ImportManager.importClsAlias(Aa.class, "User"),
+                ImportManager.importClsAlias(Bb.class, "Order")))
+            .build();
+        Express4Runner express4Runner = new Express4Runner(initOptions);
+        
+        QLResult result = express4Runner
+            .execute("user = new User(); user.name = 'jack'; " + "order = new Order(); order.amount = 100; "
+                + "user.name + ':' + order.amount", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        assertEquals("jack:100", result.getResult());
+----
+
+=== Custom ClassLoader
+
+QLExpress4 supports specifying class loaders through custom `ClassSupplier`, which is very useful in scenarios like plugin architecture and modular applications. Through custom class loaders, QLExpress scripts can access classes in specific ClassLoaders.
+
+The following example shows how to integrate with the link:https://pf4j.org/[PF4J] plugin framework to allow QLExpress scripts to access classes in plugins:
+
+[source,java,indent=0]
+----
+        // Specify plugin directory (test-plugins directory under test resources)
+        Path pluginsDir = new File("src/test/resources/test-plugins").toPath();
+        PluginManager pluginManager = new DefaultPluginManager(pluginsDir);
+        pluginManager.loadPlugins();
+        pluginManager.startPlugins();
+        
+        // Get the PluginClassLoader of the first plugin
+        PluginWrapper plugin = pluginManager.getPlugins().get(0);
+        ClassLoader pluginClassLoader = plugin.getPluginClassLoader();
+        
+        // Custom class supplier using plugin ClassLoader
+        ClassSupplier pluginClassSupplier = clsName -> {
+            try {
+                return Class.forName(clsName, true, pluginClassLoader);
+            }
+            catch (ClassNotFoundException | NoClassDefFoundError e) {
+                return null;
+            }
+        };
+        
+        InitOptions options = InitOptions.builder()
+            .securityStrategy(QLSecurityStrategy.open())
+            .classSupplier(pluginClassSupplier)
+            .build();
+        Express4Runner runner = new Express4Runner(options);
+        
+        String script = "import com.alibaba.qlexpress4.pf4j.TestPluginInterface; TestPluginInterface.TEST_CONSTANT";
+        Object result = runner.execute(script, Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS).getResult();
+        
+        Assert.assertEquals("Hello from PF4J Plugin!", result.toString());
+----
+
+Typical application scenarios for custom ClassSupplier:
+
+* **Plugin Architecture**: Allow scripts to access classes and interfaces defined in plugins
+* **Modular Applications**: In modular frameworks like OSGi, allow scripts to access classes in specific modules
+* **Dynamic Class Loading**: Load classes from remote repositories or dynamically generated bytecode
+* **Class Isolation**: Use different ClassLoaders to achieve class isolation
+
+=== Expression Caching
+
+Through the `cache` option, you can enable expression caching, so the same expressions won't be recompiled, greatly improving performance.
+
+Note that this cache has no size limit and is only suitable for use when expressions are in limited quantities:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        // open cache switch
+        express4Runner.execute("1+2", new HashMap<>(), QLOptions.builder().cache(true).build());
+----
+
+However, when scripts are executed for the first time, they're still relatively slow because there's no cache.
+
+You can cache scripts before first execution using the following method to ensure first execution speed:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        express4Runner.parseToDefinitionWithCache("a+b");
+----
+
+Note that this cache has an unlimited size; be sure to control its size in your application. You can periodically clear the compilation cache by calling the `clearCompileCache` method.
+
+=== Serializable Precompiled Cache
+
+If scripts need to be precompiled on a producer and then distributed as JSON to other machines for execution, use the serializable precompiled cache. QLExpress only provides JavaBean DTOs and does not add any JSON dependency; applications can serialize `SerializableParseCache` with Jackson, Fastjson2, Gson, or another JSON library.
+
+[source,java,indent=0]
+----
+        Express4Runner producer = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        SerializableParseCache cache = producer.parseToSerializableCache("price * count");
+        
+        String json = JSON.toJSONString(cache);
+        
+        // The JSON has crossed the network, and the consumer receives it.
+        SerializableParseCache parsed = JSON.parseObject(json, SerializableParseCache.class);
+        
+        Express4Runner consumer = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        Map<String, Object> context = new HashMap<>();
+        context.put("price", 5);
+        context.put("count", 3);
+        QLResult result = consumer.execute(parsed, context, QLOptions.DEFAULT_OPTIONS);
+        assertEquals(15, result.getResult());
+----
+
+For high-frequency execution, load the DTO once on the consumer side as `LoadedParseCache` so class and operator bindings are not rebuilt for every run:
+
+[source,java,indent=0]
+----
+        Express4Runner producer = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        SerializableParseCache cache = producer.parseToSerializableCache("x * 2 + 1");
+        
+        Express4Runner consumer = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        LoadedParseCache loaded = consumer.loadSerializableCache(cache);
+        
+        assertEquals(7,
+            consumer.execute(loaded, new MapExpressContext(Collections.singletonMap("x", 3)), QLOptions.DEFAULT_OPTIONS)
+                .getResult());
+        assertEquals(11,
+            consumer.execute(loaded, new MapExpressContext(Collections.singletonMap("x", 5)), QLOptions.DEFAULT_OPTIONS)
+                .getResult());
+        assertEquals(cache.getScriptHash(), loaded.getScriptHash());
+----
+
+Notes:
+
+* Producer and consumer `Express4Runner` environments must be equivalent, including default imports, class loading, user functions, custom operators, and security strategy.
+* `LoadedParseCache` is bound to the `Express4Runner` that created it and is not guaranteed to work across Runner instances.
+* Remote DTOs that contain function definitions can also be registered on the consumer Runner with `addFunctionsDefinedInScript(SerializableParseCache, ...)` or `addFunctionsDefinedInScript(LoadedParseCache, ...)`.
+* Serializable models have an independent `modelVersion` and do not automatically change with QLExpress release versions. The same `modelVersion` can be executed across different QLExpress release versions.
+* Remote precompiled scripts do not automatically write to or read from the Runner's internal `compileCache`. Applications must manage the lifecycle of DTOs or `LoadedParseCache` themselves.
+
+=== Setting Timeout
+
+You can set a timeout for scripts to prevent infinite loops or other reasons from causing excessive consumption of application resources.
+
+The following example code sets a 10ms timeout for the script:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        try {
+            express4Runner.execute("while (true) {\n" + "  1+1\n" + "}",
+                Collections.emptyMap(),
+                QLOptions.builder().timeoutMillis(10L).build());
+            fail("should timeout");
+        }
+        catch (QLTimeoutException e) {
+            assertEquals(QLErrorCodes.SCRIPT_TIME_OUT.name(), e.getErrorCode());
+        }
+----
+
+> Note: For system performance considerations, QLExpress's detection of timeout is not accurate. Especially for timeouts occurring in Java code callbacks (such as custom functions or operators), they won't be detected immediately. Only after execution is complete and back to QLExpress runtime will they be detected and execution interrupted.
+
+=== Extension Functions
+
+Using QLExpress's extension function capability, you can add additional member methods to Java classes.
+
+Extension functions are implemented based on QLExpress runtime, so they're only effective in QLExpress scripts.
+
+The following example code adds a `hello()` extension function to the String class:
+
+[source,java,indent=0]
+----
+        ExtensionFunction helloFunction = new ExtensionFunction() {
+            @Override
+            public Class<?>[] getParameterTypes() {
+                return new Class[0];
+            }
+            
+            @Override
+            public String getName() {
+                return "hello";
+            }
+            
+            @Override
+            public Class<?> getDeclaringClass() {
+                return String.class;
+            }
+            
+            @Override
+            public Object invoke(Object obj, Object[] args) {
+                String originStr = (String)obj;
+                return "Hello," + originStr;
+            }
+        };
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        express4Runner.addExtendFunction(helloFunction);
+        Object result =
+            express4Runner.execute("'jack'.hello()", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals("Hello,jack", result);
+        
+        // simpler way to define extension function
+        express4Runner.addExtendFunction("add",
+            Number.class,
+            params -> ((Number)params[0]).intValue() + ((Number)params[1]).intValue());
+        QLResult resultAdd = express4Runner.execute("1.add(2)", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS);
+        assertEquals(3, resultAdd.getResult());
+        
+----
+
+=== Java Class Object, Field, and Method Aliases
+
+QLExpress supports defining one or more aliases for objects, fields, or methods through the `QLAlias` annotation, making it convenient for non-technical personnel to use expressions to define rules.
+
+In the following example, the final order amount is calculated based on whether the user is a vip.
+
+User class definition:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.test.qlalias;
+
+import com.alibaba.qlexpress4.annotation.QLAlias;
+
+@QLAlias("用户")
+public class User {
+    
+    @QLAlias("是vip")
+    private boolean vip;
+    
+    @QLAlias("用户名")
+    private String name;
+    
+    public boolean isVip() {
+        return vip;
+    }
+    
+    public void setVip(boolean vip) {
+        this.vip = vip;
+    }
+    
+    public String getName() {
+        return name;
+    }
+    
+    public void setName(String name) {
+        this.name = name;
+    }
+}
+----
+
+Order class definition:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.test.qlalias;
+
+import com.alibaba.qlexpress4.annotation.QLAlias;
+
+@QLAlias("订单")
+public class Order {
+    
+    @QLAlias("订单号")
+    private String orderNum;
+    
+    @QLAlias("金额")
+    private int amount;
+    
+    public String getOrderNum() {
+        return orderNum;
+    }
+    
+    public void setOrderNum(String orderNum) {
+        this.orderNum = orderNum;
+    }
+    
+    public int getAmount() {
+        return amount;
+    }
+    
+    public void setAmount(int amount) {
+        this.amount = amount;
+    }
+}
+----
+
+Calculate final order amount through QLExpress script rules:
+
+[source,java,indent=0]
+----
+        Order order = new Order();
+        order.setOrderNum("OR123455");
+        order.setAmount(100);
+        
+        User user = new User();
+        user.setName("jack");
+        user.setVip(true);
+        
+        // Calculate the Final Order Amount
+        Express4Runner express4Runner =
+            new Express4Runner(InitOptions.builder().securityStrategy(QLSecurityStrategy.open()).build());
+        Number result = (Number)express4Runner
+            .executeWithAliasObjects("用户.是vip? 订单.金额 * 0.8 : 订单.金额", QLOptions.DEFAULT_OPTIONS, order, user)
+            .getResult();
+        assertEquals(80, result.intValue());
+----
+
+=== Keyword, Operator, and Function Aliases
+
+To further facilitate non-technical personnel in writing rules, QLExpress provides `addAlias` to add aliases to original keywords, operators, and functions, making the entire script expression more natural language-like.
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        // add custom function zero
+        express4Runner.addFunction("zero", (String ignore) -> 0);
+        
+        // keyword alias
+        assertTrue(express4Runner.addAlias("如果", "if"));
+        assertTrue(express4Runner.addAlias("则", "then"));
+        assertTrue(express4Runner.addAlias("否则", "else"));
+        assertTrue(express4Runner.addAlias("返回", "return"));
+        // operator alias
+        assertTrue(express4Runner.addAlias("大于", ">"));
+        // function alias
+        assertTrue(express4Runner.addAlias("零", "zero"));
+        
+        Map<String, Object> context = new HashMap<>();
+        context.put("语文", 90);
+        context.put("数学", 90);
+        context.put("英语", 90);
+        
+        Object result = express4Runner
+            .execute("如果 (语文 + 数学 + 英语 大于 270) 则 {返回 1;} 否则 {返回 零();}", context, QLOptions.DEFAULT_OPTIONS)
+            .getResult();
+        assertEquals(0, result);
+----
+
+Keywords that support setting aliases include:
+
+ * if
+ * then
+ * else
+ * for
+ * while
+ * break
+ * continue
+ * return
+ * function
+ * macro
+ * new
+ * null
+ * true
+ * false
+
+> Note: Some familiar usages are actually operators, not keywords, such as the `in` operator. All operators and functions support aliases by default
+
+=== Macros
+
+Macros are a powerful code reuse mechanism in QLExpress that allows users to define reusable script fragments and call them when needed. Unlike simple text replacement, QLExpress macros are implemented based on instruction replay mechanism, providing better performance and semantic accuracy.
+
+Macros are particularly suitable for the following scenarios:
+
+* **Code Reuse**: Encapsulate commonly used script fragments into macros to avoid repeatedly writing the same logic
+* **Business Rule Templates**: Define standard business rule templates such as price calculation, permission checking, etc.
+* **Flow Control**: Encapsulate complex control flows such as conditional judgment, loop logic, etc.
+* **DSL Construction**: As basic components for building domain-specific languages
+
+Macros can be defined in two ways:
+
+**1. Using `macro` keyword in scripts**
+
+[source,java]
+----
+macro add {
+  c = a + b;
+}
+
+a = 1;
+b = 2;
+add;
+assert(c == 3);
+----
+
+**2. Adding through Java API**
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        express4Runner.addMacro("rename", "name='haha-'+name");
+        Map<String, Object> context = Collections.singletonMap("name", "wuli");
+        Object result = express4Runner.execute("rename", context, QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals("haha-wuli", result);
+        
+        // replace macro
+        express4Runner.addOrReplaceMacro("rename", "name='huhu-'+name");
+        Object result1 = express4Runner.execute("rename", context, QLOptions.DEFAULT_OPTIONS).getResult();
+        assertEquals("huhu-wuli", result1);
+----
+
+Differences between macros and functions:
+
+[cols="1,1,1"]
+|===
+| Feature | Macro | Function
+| Parameter Passing | No parameters, relies on context variables | Supports parameter passing
+| Performance | Direct instruction insertion, no call overhead | Has function call overhead
+| Scope | Shares caller's scope | Independent scope
+| Applicable Scenarios | Code fragment reuse | Logic encapsulation and parameterization
+|===
+
+Macros are particularly suitable for code fragment reuse scenarios that don't require parameter passing and mainly rely on context variables, while functions are more suitable for scenarios requiring parameterization and independent scope.
+
+**Changes in macro features in QLExpress4 compared to version 3**:
+
+ * Version 4's macro implementation is closer to the definition of macros in common programming languages, equivalent to inserting predefined code fragments at the macro's location, sharing the same scope as the call point. `return`, `continue`, and `break` in macros can affect the control flow of the caller. However, version 3's implementation is actually closer to parameterless function calls.
+ * Version 4's macros cannot be used as variables, only when standing alone as a line statement can they be macro-replaced. Because macros can be arbitrary scripts, not necessarily expressions with return values, using them as variables would have semantic issues. Version 3's macros are essentially parameterless function calls, so they're often used as variables.
+
+If you want to be compatible with version 3's macro features, it's recommended to use link:#dynamic-variables[Dynamic Variables]
+
+=== Dynamic Variables
+
+Regular "static variables" are fixed values associated with keys in the context. Dynamic variables can be expressions calculated from other variables. Dynamic variables support nesting, meaning dynamic variables can depend on another dynamic variable for calculation.
+
+Example:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        
+        Map<String, Object> staticContext = new HashMap<>();
+        staticContext.put("语文", 88);
+        staticContext.put("数学", 99);
+        staticContext.put("英语", 95);
+        
+        QLOptions defaultOptions = QLOptions.DEFAULT_OPTIONS;
+        DynamicVariableContext dynamicContext =
+            new DynamicVariableContext(express4Runner, staticContext, defaultOptions);
+        dynamicContext.put("平均成绩", "(语文+数学+英语)/3.0");
+        dynamicContext.put("是否优秀", "平均成绩>90");
+        
+        // dynamic var
+        assertTrue((Boolean)express4Runner.execute("是否优秀", dynamicContext, defaultOptions).getResult());
+        assertEquals(94,
+            ((Number)express4Runner.execute("平均成绩", dynamicContext, defaultOptions).getResult()).intValue());
+        // static var
+        assertEquals(187,
+            ((Number)express4Runner.execute("语文+数学", dynamicContext, defaultOptions).getResult()).intValue());
+----
+
+=== Expression Calculation Tracing
+
+If relevant options are enabled, QLExpress4 will return an expression trace tree along with the rule script calculation result. The structure of the expression trace tree is similar to a syntax tree, with the difference that it records intermediate results of this execution at each node.
+
+For example, for the expression `!true || myTest(a, 1)`, the structure of the expression trace tree is roughly as follows:
+
+[source]
+----
+        || true
+       /      \
+    ! false  myTest
+    /        /   \
+ true       a 10     1
+----
+
+It can be applied to various scenarios:
+
+ * Help business personnel analyze and troubleshoot rule calculation results
+ * Sample and categorize rules judged as false online
+ * AI automatic diagnosis and repair of rules
+
+Node calculation results are placed in the `value` field of the `ExpressionTrace` object. If short-circuit occurs in the middle causing some expressions to not be calculated, the `evaluated` field of the `ExpressionTrace` object will be set to false. Code example:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.builder().traceExpression(true).build());
+        express4Runner.addFunction("myTest", (Predicate<Integer>)i -> i > 10);
+        
+        Map<String, Object> context = new HashMap<>();
+        context.put("a", true);
+        QLResult result = express4Runner
+            .execute("a && (!myTest(11) || false)", context, QLOptions.builder().traceExpression(true).build());
+        Assert.assertFalse((Boolean)result.getResult());
+        
+        List<ExpressionTrace> expressionTraces = result.getExpressionTraces();
+        Assert.assertEquals(1, expressionTraces.size());
+        ExpressionTrace expressionTrace = expressionTraces.get(0);
+        Assert.assertEquals("OPERATOR && false\n" + "  | VARIABLE a true\n" + "  | OPERATOR || false\n"
+            + "      | OPERATOR ! false\n" + "          | FUNCTION myTest true\n" + "              | VALUE 11 11\n"
+            + "      | VALUE false false\n", expressionTrace.toPrettyString(0));
+        
+        // short circuit
+        context.put("a", false);
+        QLResult resultShortCircuit = express4Runner.execute("(a && true) && (!myTest(11) || false)",
+            context,
+            QLOptions.builder().traceExpression(true).build());
+        Assert.assertFalse((Boolean)resultShortCircuit.getResult());
+        ExpressionTrace expressionTraceShortCircuit = resultShortCircuit.getExpressionTraces().get(0);
+        Assert.assertEquals(
+            "OPERATOR && false\n" + "  | OPERATOR && false\n" + "      | VARIABLE a false\n" + "      | VALUE true \n"
+                + "  | OPERATOR || \n" + "      | OPERATOR ! \n" + "          | FUNCTION myTest \n"
+                + "              | VALUE 11 \n" + "      | VALUE false \n",
+            expressionTraceShortCircuit.toPrettyString(0));
+        Assert.assertTrue(expressionTraceShortCircuit.getChildren().get(0).isEvaluated());
+        Assert.assertFalse(expressionTraceShortCircuit.getChildren().get(1).isEvaluated());
+        
+        // in
+        QLResult resultIn = express4Runner
+            .execute("'ab' in ['cc', 'dd', 'ff']", context, QLOptions.builder().traceExpression(true).build());
+        Assert.assertFalse((Boolean)resultIn.getResult());
+        ExpressionTrace expressionTraceIn = resultIn.getExpressionTraces().get(0);
+        Assert
+            .assertEquals(
+                "OPERATOR in false\n" + "  | VALUE 'ab' ab\n" + "  | LIST [ [cc, dd, ff]\n" + "      | VALUE 'cc' cc\n"
+                    + "      | VALUE 'dd' dd\n" + "      | VALUE 'ff' ff\n",
+                expressionTraceIn.toPrettyString(0));
+----
+
+> Note: You must set the `InitOptions.traceExpression` option to true when creating `Express4Runner`, and set `QLOptions.traceExpression` to true when executing scripts for this feature to take effect.
+
+You can also get all expression trace points without executing scripts:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        TracePointTree tracePointTree = express4Runner.getExpressionTracePoints("1+3+5*ab+9").get(0);
+        Assert.assertEquals("OPERATOR +\n" + "  | OPERATOR +\n" + "      | OPERATOR +\n" + "          | VALUE 1\n"
+            + "          | VALUE 3\n" + "      | OPERATOR *\n" + "          | VALUE 5\n" + "          | VARIABLE ab\n"
+            + "  | VALUE 9\n", tracePointTree.toPrettyString(0));
+----
+
+Supported expression trace point types and corresponding child node meanings are as follows:
+
+[cols="1,1,1"]
+|===
+| Node Type | Node Meaning | Child Node Meaning
+| OPERATOR | Operator | Both operands
+| FUNCTION | Function | Function parameters
+| METHOD   | Method | Method parameters
+| FIELD    | Field | Target object for field access
+| LIST     | List | List elements
+| MAP      | Field | None
+| IF       | Conditional branch | Condition expression, then logic block and else logic block
+| SWITCH   | switch branch | Switch expression, case branch conditions and code blocks, and the default code block
+| RETURN   | Return statement | Return expression
+| VARIABLE | Variable | None
+| VALUE    | Literal value | None
+| DEFINE_FUNCTION | Define function | None
+| DEFINE_MACRO | Define macro | None
+| PRIMARY  | Other composite values not yet drilled down (such as dictionaries, if, etc.) | None
+| STATEMENT | Other composite statements not yet drilled down (such as while, for, etc.) | None
+|===
+
+=== Spring Integration
+
+QLExpress doesn't need special integration with Spring, just a `Express4Runner` singleton is sufficient.
+
+The "integration" example provided here allows direct reference to any Spring Bean in QLExpress scripts.
+
+While this approach is very convenient, it gives scripts too much permission and freedom. It's no longer recommended. It's still recommended to only put objects that users are allowed to access in the context.
+
+Core integration components:
+
+* link:src/test/java/com/alibaba/qlexpress4/spring/QLSpringContext.java[QLSpringContext]: Implements the `ExpressContext` interface, providing access capability to the Spring container. It first looks for variables from the passed context, and if not found, tries to get beans with the same name from the Spring container.
+* link:src/test/java/com/alibaba/qlexpress4/spring/QLExecuteService.java[QLExecuteService]: Encapsulates QLExpress execution logic, integrates with Spring container, convenient for use in Spring applications.
+
+Assuming there's a Spring Bean named `helloService`:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.spring;
+
+import org.springframework.stereotype.Service;
+
+/**
+ * Spring Bean example service class
+ */
+@Service
+public class HelloService {
+    
+    /**
+     * Hello method that returns a greeting string
+     * @return greeting string
+     */
+    public String hello(String name) {
+        return "Hello, " + name + "!";
+    }
+}
+----
+
+Call this Bean in scripts:
+
+[source,java,indent=0]
+----
+package com.alibaba.qlexpress4.spring;
+
+import org.junit.Assert;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * HelloService unit test class
+ */
+@RunWith(SpringJUnit4ClassRunner.class)
+@ContextConfiguration(classes = SpringTestConfig.class)
+public class SpringDemoTest {
+    
+    @Autowired
+    private QLExecuteService qlExecuteService;
+    
+    @Test
+    public void qlExecuteWithSpringContextTest() {
+        Map<String, Object> context = new HashMap<>();
+        context.put("name", "Wang");
+        String result = (String)qlExecuteService.execute("helloService.hello(name)", context);
+        Assert.assertEquals("Hello, Wang!", result);
+    }
+}
+----
+
+
+== Syntax Introduction
+
+QLExpress4 is compatible with Java8 syntax while also providing many more flexible and loose syntax patterns to help users write expressions more quickly.
+
+Based on expression-first syntax design, complex conditional judgment statements can also be directly used as expressions.
+
+Code snippets appearing in this chapter are all qlexpress scripts.
+`assert` is an assertion method injected by the test framework into the engine, ensuring its parameter is `true`.
+`assertErrCode` ensures that the lambda parameter expression execution will definitely throw a QLException containing the second parameter error code.
+
+=== Variable Declaration
+
+Supports both static typing and dynamic typing:
+
+ * When declaring variables without writing types, the variable is dynamic type and also an assignment expression
+ * When declaring variables with types, it's static type, and at this time it's a variable declaration statement
+
+[source,java]
+----
+// Dynamic Typeing
+a = 1;
+a = "1";
+// Static Typing
+int b = 2;
+// throw QLException with error code INCOMPATIBLE_ASSIGNMENT_TYPE when assign with incompatible type String
+assertErrorCode(() -> b = "1", "INCOMPATIBLE_ASSIGNMENT_TYPE")
+
+----
+
+=== Convenient Syntax Elements
+
+Common syntax elements like lists (List), mappings (Map), etc. all have very convenient construction syntax sugar in QLExpress:
+
+[source,java]
+----
+// list
+l = [1,2,3]
+assert(l[0]==1)
+assert(l[-1]==3)
+// Underlying data type of list is ArrayList in Java
+assert(l instanceof ArrayList)
+// map
+m = {
+  "aa": 10,
+  "bb": {
+    "cc": "cc1",
+    "dd": "dd1"
+  }
+}
+assert(m['aa']==10)
+// Underlying data type of map is LinkedHashMap in Java
+assert(m instanceof LinkedHashMap)
+// empty map
+emMap = {:}
+emMap['haha']='huhu'
+assert(emMap['haha']=='huhu')
+----
+
+Through the `*.` operator, you can quickly process lists and mappings, such as taking properties of list elements, or getting key lists and value lists of mappings:
+
+[source,java]
+----
+list = [
+  {
+    "name": "Li",
+    "age": 10
+  },
+  {
+    "name": "Wang",
+    "age": 15
+  }
+]
+
+// get field from list
+assert(list*.age==[10,15])
+
+mm = {
+  "aaa": 1,
+  "bbb": 2
+}
+
+// get map key value list
+assert(mm*.key==["aaa", "bbb"])
+assert(mm*.value==[1, 2])
+----
+
+The `*.` operator also supports automatic flattening of multi-level nested lists. When a list contains nested lists, the operator will automatically and recursively flatten all levels until it finds elements with the specified property or method:
+
+[source,java]
+----
+// Use case 1: Spread nested list to get field values
+l = [[{"a":10},{"a":12}],[{"a":13}],[{"a":14}]]
+result = l*.a
+assert(result == [10, 12, 13, 14])
+
+// Use case 2: Spread nested list to call methods
+l2 = [[{"a":10},{"a":12}],[{"a":13}],[{"a":14}]]
+result2 = l2*.get("a")
+assert(result2 == [10, 12, 13, 14])
+
+// Use case 3: if field exists at current level, don't flatten
+l3 = [[{"a":10},{"a":12}],[{"a":13}],[{"a":14}]]
+result3 = l3*.length
+assert(result3 == [2, 1, 1])
+----
+
+In mappings, by specifying the fully qualified name of the type through the `@class` key, you can directly use JSON to create complex Java objects. For example, the following MyHome is a Java class with complex nested types:
+
+[source,java]
+----
+package com.alibaba.qlexpress4.inport;
+
+/**
+ * Author: DQinYuan
+ */
+public class MyHome {
+    
+    private String sofa;
+    
+    private String chair;
+    
+    private MyDesk myDesk;
+    
+    private String bed;
+    
+    public String getSofa() {
+        return sofa;
+    }
+    
+    public void setSofa(String sofa) {
+        this.sofa = sofa;
+    }
+    
+    public String getChair() {
+        return chair;
+    }
+    
+    public MyDesk getMyDesk() {
+        return myDesk;
+    }
+    
+    public void setMyDesk(MyDesk myDesk) {
+        this.myDesk = myDesk;
+    }
+    
+    public void setChair(String chair) {
+        this.chair = chair;
+    }
+    
+    public String getBed() {
+        return bed;
+    }
+}
+----
+
+You can conveniently create it through the following QLExpress script:
+
+> Note: This feature requires opening security options as referenced in link:#security-strategy[Security Strategy] to execute normally.
+
+[source,java]
+----
+myHome = {
+  '@class': 'com.alibaba.qlexpress4.inport.MyHome',
+  'sofa': 'a-sofa',
+  'chair': 'b-chair',
+  'myDesk': {
+    'book1': 'Then Moon and Sixpence',
+    '@class': 'com.alibaba.qlexpress4.inport.MyDesk'
+  },
+  // ignore field that don't exist
+  'notexist': 1234
+}
+assert(myHome.getSofa()=='a-sofa')
+assert(myHome instanceof com.alibaba.qlexpress4.inport.MyHome)
+assert(myHome.getMyDesk().getBook1()=='Then Moon and Sixpence')
+assert(myHome.getMyDesk() instanceof com.alibaba.qlexpress4.inport.MyDesk)
+----
+
+=== Numbers
+
+For numbers without declared types,
+QLExpress will automatically select the most appropriate one from data types like int, long, BigInteger, double, BigDecimal based on their range:
+
+[source,java]
+----
+assert(2147483647 instanceof Integer);
+assert(9223372036854775807 instanceof Long);
+assert(18446744073709552000 instanceof BigInteger);
+// 0.25 can be precisely presented with double
+assert(0.25 instanceof Double);
+assert(2.7976931348623157E308 instanceof BigDecimal);
+----
+
+Therefore, when writing custom functions or operators, it's recommended to use Number type for receiving, because numeric types cannot be determined in advance.
+
+=== Dynamic Strings
+
+Dynamic strings are a new capability introduced in QLExpress version 4 to enhance string processing capabilities.
+
+Supports inserting expression calculations in strings through the `$\{expression}` format:
+
+> If you want to keep `$\{expression}` as-is in strings, you can escape `$` using `\$`
+
+[source,java]
+----
+a = 123
+assert("hello,${a-1}" == "hello,122")
+
+// escape $ with \$
+assert("hello,\${a-1}" == "hello,\${a-1}")
+
+b = "test"
+assert("m xx ${
+  if (b like 't%') {
+      'YYY'
+  }
+}" == "m xx YYY")
+----
+
+If you want QLExpress4 strings to maintain compatibility with version 3 and not process interpolation expressions, you can directly turn off this feature when creating `Express4Runner`:
+
+[source,java,indent=0]
+----
+        Express4Runner express4RunnerDisable = new Express4Runner(
+            // disable string interpolation
+            InitOptions.builder().interpolationMode(InterpolationMode.DISABLE).build());
+        Assert.assertEquals("Hello,${ a + 1 }",
+            express4RunnerDisable.execute("\"Hello,${ a + 1 }\"", context, QLOptions.DEFAULT_OPTIONS).getResult());
+        Assert.assertEquals("Hello,${lll",
+            express4RunnerDisable.execute("\"Hello,${lll\"", context, QLOptions.DEFAULT_OPTIONS).getResult());
+        Assert.assertEquals("Hello,aaa $ lll\"\n\b",
+            express4RunnerDisable.execute("\"Hello,aaa $ lll\\\"\n\b\"", context, QLOptions.DEFAULT_OPTIONS)
+                .getResult());
+----
+
+=== Template Rendering
+
+Leveraging dynamic strings, QLExpress4 can also be used as a lightweight template engine.
+
+You don't need to manually add string quotes in the script. Just call `executeTemplate` to render the template string:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        Map<String, Object> context = new HashMap<>();
+        context.put("a", 1);
+        context.put("b", 2);
+        context.put("c", "test");
+        QLResult simpleTemplate = express4Runner.executeTemplate("a ${a};b ${b+2}", context, QLOptions.DEFAULT_OPTIONS);
+        Assert.assertEquals("a 1;b 4", simpleTemplate.getResult());
+        QLResult conditionTemplate =
+            express4Runner.executeTemplate("m xx ${\n" + "  if (c like 't%') {\n" + "      'YYY'\n" + "  }\n" + "}",
+                context,
+                QLOptions.DEFAULT_OPTIONS);
+        Assert.assertEquals("m xx YYY", conditionTemplate.getResult());
+        QLResult multiLineTemplate = express4Runner.executeTemplate("m\n ${a}\n c", context, QLOptions.DEFAULT_OPTIONS);
+        Assert.assertEquals("m\n 1\n c", multiLineTemplate.getResult());
+        QLResult escapeStringTemplate =
+            express4Runner.executeTemplate("m \n\"haha\" d\"", context, QLOptions.DEFAULT_OPTIONS);
+        Assert.assertEquals("m \n\"haha\" d\"", escapeStringTemplate.getResult());
+----
+
+=== Placeholders
+
+Placeholders are used to extract values of arbitrary keys from the context.
+
+Global variables can also extract values from the context, but are limited by QLExpress keywords and syntax, so the keys that can be extracted are limited.
+For example, the value corresponding to key "0" in the context cannot be extracted through variables, because 0 is not a legal variable in QLExpress, but a numeric constant.
+At this time, you can use the default placeholder `$\{0}` to extract it.
+
+> Note the distinction from interpolation in dynamic strings. Placeholders are written outside strings. Dynamic string interpolation is `$\{expression}`, where expressions are written by default, and the running result of `"${0}"` is `"0"`. Placeholders are `$\{placeholder}`, where keys in the context are written by default, and the running result of `${0}` is the value corresponding to key "0" in the context.
+
+QLExpress uses `${placeholder}` format placeholders by default, where:
+
+* `${` is the start marker
+* `}` is the end marker
+* `placeholder` is the placeholder content, corresponding to the key in the context
+
+In addition to default placeholders, QLExpress also supports customizing the start and end markers of placeholders:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner =
+            new Express4Runner(InitOptions.builder().selectorStart("#[").selectorEnd("]").build());
+        
+        Map<String, Object> context = new HashMap<>();
+        context.put("0", "World");
+        
+        QLResult result = express4Runner.execute("'Hello ' + #[0]", context, QLOptions.DEFAULT_OPTIONS);
+        assertEquals("Hello World", result.getResult());
+----
+
+Custom placeholders are not arbitrary, with the following restrictions:
+
+* **Start Marker Restriction**: `selectorStart` must be one of the following four formats:
+  ** `${` (default)
+  ** `$[`
+  ** `#{`
+  ** `#[`
+* **End Marker Restriction**: `selectorEnd` must be a string of 1 or more characters
+
+=== Semicolons
+
+Expression statements can omit ending semicolons, and the return value of the entire script is the calculation result of the last expression.
+
+The return value of the following script is 2:
+
+[source,java]
+----
+a = 1
+b = 2
+// last express
+1+1
+----
+
+Equivalent to the following写法:
+
+[source,java]
+----
+a = 1
+b = 2
+// return statment
+return 1+1;
+----
+
+Because semicolons can be omitted, QLExpress4's handling of line breaks is stricter compared to version 3 or Java language. If you want to split single-line expressions into multiple lines, it's recommended to keep operators on the current line and move the right operand to the next line.
+
+The following multi-line expression will report a syntax error (counterexample):
+
+[source,java]
+----
+// syntax error
+a
++ b
+----
+
+The following is a correct line break example (positive example):
+
+[source,java]
+----
+a +
+b
+----
+
+Other syntax habits remain consistent with Java.
+
+=== Expressions
+
+QLExpress adopts expression-first design, where almost everything is an expression except for import, return, and loop structures.
+
+if statements are also expressions:
+
+[source,java]
+----
+assert(if (11 == 11) {
+  10
+} else {
+  20 + 2
+} + 1 == 11)
+----
+
+try catch structures are also expressions:
+
+[source,java]
+----
+assert(1 + try {
+    100 + 1/0
+} catch(e) {
+    // Throw a zero-division exception
+    11
+} == 12)
+----
+
+=== Short-Circuit Evaluation
+
+Similar to Java, `&&` and `||` logical operations are all short-circuit evaluations.
+
+For example, the expression `false && (1/0)` won't cause a division by zero error because `&&` short-circuits at the initial `false`.
+
+Short-circuit evaluation is enabled by default, and the engine also provides options to turn off short-circuit for a specific execution:
+
+> One scenario for turning off short-circuit is to ensure full warm-up of expressions
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        // execute when enable short circuit (default)
+        // `1/0` is short-circuited by the preceding `false`, so it won't throw an error.
+        assertFalse((Boolean)express4Runner.execute("false && (1/0)", Collections.emptyMap(), QLOptions.DEFAULT_OPTIONS)
+            .getResult());
+        try {
+            // execute when disable short circuit
+            express4Runner.execute("false && (1/0)",
+                Collections.emptyMap(),
+                QLOptions.builder().shortCircuitDisable(true).build());
+            fail();
+        }
+        catch (QLException e) {
+            Assert.assertEquals("INVALID_ARITHMETIC", e.getErrorCode());
+            Assert.assertEquals("Division by zero", e.getReason());
+        }
+----
+
+
+=== Control Structures
+
+==== if Branch
+
+In addition to being fully compatible with Java's `if` syntax, it also supports rule engine-like `if ... then ... else ...` syntax, where `then` can be treated as an omittable keyword:
+
+[source,java]
+----
+a = 11;
+// if ... else ...
+assert(if (a >= 0 && a < 5) {
+  true
+} else if (a >= 5 && a < 10) {
+  false
+} else if (a >= 10 && a < 15) {
+  true
+} == true)
+
+// if ... then ... else ...
+r = if (a == 11) then true else false
+assert(r == true)
+----
+
+==== while Loop
+
+[source,java]
+----
+i = 0;
+while (i < 5) {
+  if (++i == 2) {
+    break;
+  }
+}
+assert(i==2)
+----
+
+==== for Loop
+
+[source,java]
+----
+l = [];
+for (int i = 3; i < 6; i++) {
+  l.add(i);
+}
+assert(l==[3,4,5])
+----
+
+==== for-each Loop
+
+[source,java]
+----
+sum = 0;
+for (i: [0,1,2,3,4]) {
+  if (i == 2) {
+    continue;
+  }
+  sum += i;
+}
+assert(sum==8)
+----
+
+==== switch
+
+Supports Java/C-like switch syntax:
+
+[source,java]
+----
+int day = 3;
+String dayName;
+switch (day) {
+  case 1:
+    dayName = "Monday"
+    break
+  case 2:
+    dayName = "Tuesday"
+    break
+  case 3:
+    dayName = "Wednesday"
+    break
+  default:
+    dayName = "Unknown"
+}
+assert(dayName == "Wednesday")
+----
+
+When switch is used as an expression, the -> arrow must be used (while the syntax above won't throw an error, the overall expression evaluates to null):
+
+[source,java]
+----
+score = 70
+result = switch (score) {
+    case 90, 100 -> "优秀"
+    case 60, 70, 80 -> "及格"
+    default -> "不及格"
+}
+assert(result == "及格")
+----
+
+Features:
+
+* Uses `->` syntax, each case can return an expression value
+* Supports multiple case values separated by commas (e.g., `case 90, 100 ->`)
+* No fall-through, automatically exits after executing a case
+* Can be used as an expression, assigned to variables or used in other expressions
+
+==== try-catch
+
+[source,java]
+----
+assert(try {
+    100 + 1/0
+} catch(e) {
+    // Throw a zero-division exception
+    11
+} == 11)
+----
+
+=== Function Definition
+
+[source,java]
+----
+function sub(a, b) {
+    return a-b;
+}
+assert(sub(3,1)==2)
+----
+
+=== Lambda Expressions
+
+In QLExpress4, Lambda expressions as first-class citizens can be passed as variables or returned.
+
+[source,java]
+----
+add = (a, b) -> {
+  return a + b;
+}
+assert(add(1,2)==3)
+----
+
+=== List Filtering and Mapping
+
+Supports direct functional filtering and mapping of list types through filter, map methods.
+
+Implemented by adding link:#extension-functions[Extension Functions] to list types, note the distinction from methods with the same names in Stream API.
+
+Compared to Stream API, it can directly operate on lists, and return values are also directly lists, making it more convenient.
+
+[source,java]
+----
+l = ["a-111", "a-222", "b-333", "c-888"]
+assert(l.filter(i -> i.startsWith("a-"))
+        .map(i -> i.split("-")[1]) == ["111", "222"])
+----
+
+=== Java8 Syntax Compatibility
+
+QLExpress can be compatible with common Java8 syntax.
+
+Such as link:#for-each-loop[for each loops], Stream API, functional interfaces, etc.
+
+==== Stream API
+
+You can directly use stream APIs in Java collections to operate on collections.
+
+Because these stream APIs are all from methods in Java, refer to link:#security-strategy[Security Strategy] to open security options for the following scripts to execute normally.
+
+[source,java]
+----
+l = ["a-111", "a-222", "b-333", "c-888"]
+
+l2 = l.stream()
+      .filter(i -> i.startsWith("a-"))
+      .map(i -> i.split("-")[1])
+      .collect(Collectors.toList());
+assert(l2 == ["111", "222"]);
+----
+
+==== Functional Interfaces
+
+Java8 introduced functional interfaces like Function, Consumer, Predicate, etc. QLExpress's link:#lambda-expressions[Lambda Expressions] can be assigned to these interfaces or used as method parameters that receive these interfaces:
+
+[source,java]
+----
+Runnable r = () -> a = 8;
+r.run();
+assert(a == 8);
+
+Supplier s = () -> "test";
+assert(s.get() == 'test');
+
+Consumer c = (a) -> b = a + "-te";
+c.accept("ccc");
+assert(b == 'ccc-te');
+
+Function f = a -> a + 3;
+assert(f.apply(1) == 4);
+
+Function f1 = (a, b) -> a + b;
+assert(f1.apply("test-") == "test-null");
+----
+
+== Appendix I Upgrade Guide
+
+QLExpress's previous version had significant gaps with the industry in various features due to years of iteration stagnation.
+
+One of QLExpress4's goals is to make up for these gaps at once, so it chose to make bold upgrades while intentionally abandoning some compatibility. Of course, basic functionality and experience still align with the previous version.
+
+If your system already uses the old version of QLExpress, you must conduct a comprehensive regression test before upgrading to ensure all these scripts can execute normally in the new version before upgrading.
+
+If you don't have time or methods to verify them one by one, then upgrading is not recommended.
+
+If it's a new system, it's recommended to directly adopt QLExpress4. QLExpress4's ecosystem will become increasingly perfect in the future, while version 3 will be gradually abandoned.
+
+Below lists the main differences between the new and old versions to help users upgrade existing scripts. If anything is missing, feedback is welcome:
+
+=== Default Security Strategy
+
+If you completely use default options, accessing Java object fields (`o.field`) or calling member methods (`o.method()`) will throw `FIELD_NOT_FOUND` and `METHOD_NOT_FOUND` errors respectively.
+
+This is because version 3 could unrestrictedly access any fields and methods in Java application systems through reflection, which is considered unsafe in embedded scripts.
+
+If you want to be compatible with version 3's behavior, when creating `Express4Runner`, you need to set the security strategy to "open", refer to the following code:
+
+[source,java,indent=0]
+----
+        // open security strategy
+        Express4Runner express4RunnerOpen =
+            new Express4Runner(InitOptions.builder().securityStrategy(QLSecurityStrategy.open()).build());
+        Assert.assertEquals("Thinking in Java",
+            express4RunnerOpen.execute("desk.book1", context, QLOptions.DEFAULT_OPTIONS).getResult());
+        Assert.assertEquals("Effective Java",
+            express4RunnerOpen.execute("desk.getBook2()", context, QLOptions.DEFAULT_OPTIONS).getResult());
+----
+
+For details, refer to the link:#security-strategy[Security Strategy] chapter.
+
+=== Defining Mappings
+
+QLExpress old version supported quickly creating mappings through `NewMap(key:value)` syntax. Although not discussed in detail in documentation, many users learned and used this syntax through unit tests and inquiries.
+
+However, this syntax was too customized and differed greatly from industry standards, so it was removed in the new version.
+
+The new version natively supports JSON syntax and directly adopts JSON dictionary format (`{key:value}`) to quickly create mappings, making it more intuitive.
+
+For details, refer to link:#convenient-syntax-elements[Convenient Syntax Elements]
+
+=== Global Variable Context Pollution
+
+QLExpress supports passing in a global context when executing scripts, i.e., the context parameter.
+
+In the old version, if global variables were defined in scripts, these variables would also be written to the context. After script execution, you could obtain the values of global variables defined in scripts through the context.
+
+An old version example is as follows:
+
+[source,java]
+----
+// only for QLExpress 3.x
+
+String express = "a=3;a+1";
+ExpressRunner runner = new ExpressRunner(false, true);
+DefaultContext<String, Object> context = new DefaultContext<>();
+
+Object res = runner.execute(express, context, null, true, true);
+// The result of the script execution should be 4 (a+1)
+Assert.assertEquals(4, res);
+// The variable 'a' defined in the script is also stored in the context
+Assert.assertEquals(3, context.get("a"));
+----
+
+Based on research and feedback, we believe this would cause the global context to be "polluted" by scripts, posing security risks.
+
+Therefore, in QLExpress4, global variables are not written to the context by default.
+
+If you want to be compatible with version 3's features, you need to set the `polluteUserContext` option to `true`, refer to the following code:
+
+[source,java,indent=0]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.DEFAULT_OPTIONS);
+        QLOptions populateOption = QLOptions.builder().polluteUserContext(true).build();
+        Map<String, Object> populatedMap = new HashMap<>();
+        populatedMap.put("b", 10);
+        express4Runner.execute("a = 11;b = a", populatedMap, populateOption);
+        assertEquals(11, populatedMap.get("a"));
+        assertEquals(11, populatedMap.get("b"));
+        
+        // no population
+        Map<String, Object> noPopulatedMap1 = new HashMap<>();
+        express4Runner.execute("a = 11", noPopulatedMap1, QLOptions.DEFAULT_OPTIONS);
+        assertFalse(noPopulatedMap1.containsKey("a"));
+        
+        Map<String, Object> noPopulatedMap2 = new HashMap<>();
+        noPopulatedMap2.put("a", 10);
+        assertEquals(19, express4Runner.execute("a = 19;a", noPopulatedMap2, QLOptions.DEFAULT_OPTIONS).getResult());
+        assertEquals(10, noPopulatedMap2.get("a"));
+----
+
+=== Semicolons Can Be Omitted
+
+"Omittable semicolons" is already a standard feature of modern scripting languages, and QLExpress4 has also followed this trend - semicolons can be omitted.
+
+For details, refer to the link:#semicolons[Semicolons] chapter.
+
+=== Strict Newline Mode
+
+Since QLExpress4 supports omitting semicolons, the interpreter needs to use newlines to determine whether a statement has ended. Therefore, QLExpress4 has stricter requirements for newlines than QLExpress3.
+
+The following script is valid in QLExpress3 but not in QLExpress4:
+
+[source,java]
+----
+// Valid in QLExpress3, but not in QLExpress4
+商家应收=
+    价格
+   - 饭卡商家承担
+   + 平台补贴
+----
+
+In QLExpress4, the above script will be parsed as two separate statements:
+1. `商家应收 = 价格`
+2. `- 饭卡商家承担 + 平台补贴` (the second statement will result in a syntax error)
+
+To achieve the same effect in QLExpress4, you need to place the operator at the end of the line rather than at the beginning:
+
+[source,java]
+----
+// Correct way in QLExpress4
+商家应收=
+    价格 -
+    饭卡商家承担 +
+    平台补贴
+----
+
+This way, the interpreter knows that the current line's expression is not yet complete and will continue reading the next line.
+
+If you need to be compatible with QLExpress3's newline behavior, you can set the `strictNewLines` option to `false`:
+
+[source,java]
+----
+        Express4Runner express4Runner = new Express4Runner(InitOptions.builder().strictNewLines(false).build());
+        String script = "商家应收=\n    价格\n   - 饭卡商家承担\n   + 平台补贴";
+        Map<String, Object> context = new HashMap<>();
+        context.put("价格", 10);
+        context.put("饭卡商家承担", 3);
+        context.put("平台补贴", 5);
+        QLResult result = express4Runner.execute(script, context, QLOptions.DEFAULT_OPTIONS);
+        Assert.assertEquals(12, ((Number)result.getResult()).intValue());
+----
+
+Note: Non-strict newline mode causes the interpreter to ignore all newlines, which may affect code readability and the accuracy of error messages. It is recommended to use this only when you need to be compatible with legacy code.
+
+=== Obtaining char Type
+
+In QLExpress 3, single characters wrapped in single quotes were parsed as char type, not String.
+
+This caused much confusion for users, for example, the result of `"a"=='a'` would be `false`.
+
+So later in QLExpress 3, the `ExpressRunner.setIgnoreConstChar` option was added. When set to `true`, all characters wrapped in single quotes and double quotes would be parsed as String type. However, this option was turned off by default and required users to manually enable it.
+
+Considering that script users rarely use the `char` primitive type, we directly removed this option in QLExpress 4. All characters wrapped in single quotes and double quotes are now parsed as String type.
+
+If you still need to use `char` type in scripts, you can obtain it through two methods:
+
+* Type casting: `(char) 'a'`
+* Type declaration: `char a = 'a'`
+
+== Appendix II How to Contribute?
+
+=== How AI Contribute?
+
+link:CLAUDE.md[]
+
+=== How Human Contribute?
+
+QLExpress is completely open to community changes. Any suggestions and modifications will be welcome, and after discussion, reasonable ones will be accepted into the main branch.
+
+First, you need to clone the code to local. Before formally modifying the code, you need to prepare as follows:
+
+1. Execute `mvn compile` in the project root directory: When the project is first downloaded locally, there will be many classes not found, so you need to generate Antlr4 runtime code first
+2. Configure code formatting: QLExpress project has unified code format specifications, and automatic formatting needs to be configured before git commits during development
+
+Create a new file `.git/hooks/pre-commit` in the project directory with the following content:
+
+[source,bash]
+----
+#!/bin/sh
+mvn spotless:apply
+git add -u
+exit 0
+----
+
+This way, before each git commit, maven's spotless plugin will automatically execute code formatting. For specific code format configuration, see link:spotless_eclipse_formatter.xml[]
+
+3. Run unit tests: After completing code development, run all unit tests locally with `mvn test` to ensure code quality.
+== Appendix III QLExpress4 Performance Improvements
+
+link:https://www.yuque.com/xuanheng-ffjti/iunlps/pgfzw46zel2xfnie?singleDoc#%20%E3%80%8AQLExpress3%E4%B8%8E4%E6%80%A7%E8%83%BD%E5%AF%B9%E6%AF%94%E3%80%8B[QLExpress4 vs 3 Performance Comparison]
+
+Summary: In common scenarios, without compilation cache, QLExpress4 can achieve nearly 10x performance improvement over version 3; with compilation cache, there's also a 1x performance improvement.
+
+== Appendix IV Developer Contact Information
+
+ * Email:
+ ** qinyuan.dqy@alibaba-inc.com
+ ** yumin.pym@taobao.com
+ ** 704643716@qq.com
+ * WeChat:
+ ** xuanheng: dqy932087612
+ ** binggou: pymbupt
+ ** linxiang: tkk33362
+ * DingTalk Support Group
+
+image::images/qlexpress_support_group_qr_2026.jpg[]

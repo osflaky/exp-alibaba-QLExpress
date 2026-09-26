@@ -1,0 +1,52 @@
+package com.alibaba.qlexpress4.runtime.function;
+
+import com.alibaba.qlexpress4.exception.UserDefineException;
+import com.alibaba.qlexpress4.member.MethodHandler;
+import com.alibaba.qlexpress4.runtime.IMethod;
+import com.alibaba.qlexpress4.runtime.JvmIMethod;
+import com.alibaba.qlexpress4.runtime.MemberResolver;
+import com.alibaba.qlexpress4.runtime.Parameters;
+import com.alibaba.qlexpress4.runtime.QContext;
+import com.alibaba.qlexpress4.runtime.Value;
+import com.alibaba.qlexpress4.runtime.data.convert.ParametersTypeConvertor;
+import com.alibaba.qlexpress4.utils.BasicUtil;
+
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
+
+/**
+ * Author: DQinYuan
+ */
+public class QMethodFunction implements CustomFunction {
+    
+    private final Object object;
+    
+    private final IMethod method;
+    
+    public QMethodFunction(Object object, Method method) {
+        this.object = object;
+        this.method = new JvmIMethod(method);
+    }
+    
+    @Override
+    public Object call(QContext qContext, Parameters parameters)
+        throws Throwable {
+        Class<?>[] type = new Class[parameters.size()];
+        Object[] params = new Object[parameters.size()];
+        for (int i = 0; i < params.length; i++) {
+            Value v = parameters.get(i);
+            params[i] = v.get();
+            type[i] = v.getType();
+        }
+        
+        IMethod resolved = MemberResolver.resolveMethod(Collections.singletonList(method), type);
+        if (resolved == null) {
+            throw new UserDefineException(UserDefineException.ExceptionType.INVALID_ARGUMENT,
+                "invalid argument types " + Arrays.toString(type) + " for java method '" + method.getName() + "'"
+                    + " in declaring java class '" + method.getDeclaringClass().getName() + "'");
+        }
+        Object[] convertResult = ParametersTypeConvertor.cast(params, method.getParameterTypes(), method.isVarArgs());
+        return MethodHandler.Access.accessMethodValue(method, object, convertResult);
+    }
+}
