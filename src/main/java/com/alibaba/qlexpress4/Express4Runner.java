@@ -1,0 +1,746 @@
+package com.alibaba.qlexpress4;
+
+import com.alibaba.qlexpress4.aparser.CheckVisitor;
+import com.alibaba.qlexpress4.aparser.GeneratorScope;
+import com.alibaba.qlexpress4.aparser.ImportManager;
+import com.alibaba.qlexpress4.aparser.MacroDefine;
+import com.alibaba.qlexpress4.aparser.OutFunctionVisitor;
+import com.alibaba.qlexpress4.aparser.OutVarAttrsVisitor;
+import com.alibaba.qlexpress4.aparser.OutVarNamesVisitor;
+import com.alibaba.qlexpress4.aparser.QCompileCache;
+import com.alibaba.qlexpress4.aparser.QLParser;
+import com.alibaba.qlexpress4.aparser.QvmInstructionVisitor;
+import com.alibaba.qlexpress4.aparser.SyntaxTreeFactory;
+import com.alibaba.qlexpress4.aparser.TraceExpressionVisitor;
+import com.alibaba.qlexpress4.api.BatchAddFunctionResult;
+import com.alibaba.qlexpress4.api.QLFunctionalVarargs;
+import com.alibaba.qlexpress4.api.parsecache.LoadedParseCache;
+import com.alibaba.qlexpress4.api.parsecache.SerializableParseCache;
+import com.alibaba.qlexpress4.api.parsecache.SerializableParseCacheException;
+import com.alibaba.qlexpress4.api.parsecache.SerializableParseCacheExporter;
+import com.alibaba.qlexpress4.api.parsecache.SerializableParseCacheImporter;
+import com.alibaba.qlexpress4.exception.QLErrorCodes;
+import com.alibaba.qlexpress4.exception.PureErrReporter;
+import com.alibaba.qlexpress4.exception.QLException;
+import com.alibaba.qlexpress4.exception.QLSyntaxException;
+import com.alibaba.qlexpress4.runtime.DelegateQContext;
+import com.alibaba.qlexpress4.runtime.QLambda;
+import com.alibaba.qlexpress4.runtime.QLambdaDefinitionInner;
+import com.alibaba.qlexpress4.runtime.QLambdaTrace;
+import com.alibaba.qlexpress4.runtime.QvmGlobalScope;
+import com.alibaba.qlexpress4.runtime.QvmRuntime;
+import com.alibaba.qlexpress4.runtime.ReflectLoader;
+import com.alibaba.qlexpress4.runtime.Value;
+import com.alibaba.qlexpress4.runtime.context.ExpressContext;
+import com.alibaba.qlexpress4.runtime.context.MapExpressContext;
+import com.alibaba.qlexpress4.runtime.context.ObjectFieldExpressContext;
+import com.alibaba.qlexpress4.runtime.context.QLAliasContext;
+import com.alibaba.qlexpress4.runtime.function.CustomFunction;
+import com.alibaba.qlexpress4.runtime.function.ExtensionFunction;
+import com.alibaba.qlexpress4.runtime.function.QMethodFunction;
+import com.alibaba.qlexpress4.runtime.instruction.QLInstruction;
+import com.alibaba.qlexpress4.runtime.operator.CustomBinaryOperator;
+import com.alibaba.qlexpress4.runtime.operator.OperatorManager;
+import com.alibaba.qlexpress4.runtime.trace.ExpressionTrace;
+import com.alibaba.qlexpress4.runtime.trace.QTraces;
+import com.alibaba.qlexpress4.runtime.trace.TracePointTree;
+import com.alibaba.qlexpress4.utils.BasicUtil;
+import com.alibaba.qlexpress4.utils.QLFunctionUtil;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+/**
+ * Author: DQinYuan
+ */
+public class Express4Runner {
+    private final OperatorManager operatorManager = new OperatorManager();
+    
+    private final Map<String, Future<QCompileCache>> compileCache = new ConcurrentHashMap<>();
+    
+    private final Map<String, CustomFunction> userDefineFunction = new ConcurrentHashMap<>();
+    
+    private final GeneratorScope globalScope = new GeneratorScope(null, "global", new ConcurrentHashMap<>());
+    
+    private final ReflectLoader reflectLoader;
+    
+    private final InitOptions initOptions;
+    
+    public Express4Runner(InitOptions initOptions) {
+        this.initOptions = initOptions;
+        this.reflectLoader = new ReflectLoader(initOptions.getSecurityStrategy(), initOptions.isAllowPrivateAccess());
+    }
+    
+    public CustomFunction getFunction(String functionName) {
+        return userDefineFunction.get(functionName);
+    }
+    
+    /**
+     * Execute the script with variables set in the context; the map key corresponds to the
+     * variable name referenced in the script.
+     *
+     * @param script     the script content to execute
+     * @param context    variables for execution, keyed by variable name
+     * @param qlOptions  execution options (e.g. interpolation, debug)
+     * @return result of script execution and related traces
+     * @throws QLException if a script or runtime error occurs
+     */
+    public QLResult execute(String script, Map<String, Object> context, QLOptions qlOptions)
+        throws QLException {
+        return execute(script, new MapExpressContext(context), qlOptions);
+    }
+    
+    /**
+     * Execute a template string by wrapping it as a dynamic string literal.
+     * Template does not support newlines in this mode.
+     *
+     * @param template   the template text to evaluate as a dynamic string
+     * @param context    variables available to the template
+     * @param qlOptions  execution options
+     * @return result of template evaluation
+     * @throws QLException if compilation or execution fails
+     */
+    public QLResult executeTemplate(String template, Map<String, Object> context, QLOptions qlOptions)
+        throws QLException {
+        String script = wrapAsDynamicString(template);
+        return execute(script, context, qlOptions);
+    }
+    
+    private String wrapAsDynamicString(String template) {
+        if (template == null) {
+            return "\"\"";
+        }
+        String escaped = template.replace("\"", "\\\"");
+        return "\"" + escaped + "\"";
+    }
+    
+    /**
+     * Execute the script with variables resolved from the fields of the given context object.
+     * The variable name in the script corresponds to the field name on the object.
+     *
+     * @param script     the script content to execute
+     * @param context    the object whose public fields/properties are exposed as variables
+     * @param qlOptions  execution options
+     * @return result of script execution
+     * @throws QLException if a script or runtime error occurs
+     */
+    public QLResult execute(String script, Object context, QLOptions qlOptions)
+        throws QLException {
+        return execute(script, new ObjectFieldExpressContext(context, this), qlOptions);
+    }
+    
+    /**
+     * Execute the script using objects annotated with {@code @QLAlias}.
+     * The {@code QLAlias.value} serves as the variable name for each object.
+     * Objects without the annotation are ignored.
+     *
+     * @param script     the script content to execute
+     * @param qlOptions  execution options
+     * @param objects    objects annotated with {@code @QLAlias}
+     * @return result of script execution
+     * @throws QLException if a script or runtime error occurs
+     */
+    public QLResult executeWithAliasObjects(String script, QLOptions qlOptions, Object... objects) {
+        return execute(script, new QLAliasContext(objects), qlOptions);
+    }
+    
+    public QLResult execute(String script, ExpressContext context, QLOptions qlOptions) {
+        QLambdaTrace mainLambdaTrace;
+        if (initOptions.isDebug()) {
+            long start = System.currentTimeMillis();
+            mainLambdaTrace = parseToLambda(script, context, qlOptions);
+            initOptions.getDebugInfoConsumer()
+                .accept("Compile consume time: " + (System.currentTimeMillis() - start) + " ms");
+        }
+        else {
+            mainLambdaTrace = parseToLambda(script, context, qlOptions);
+        }
+        return executeLambdaTrace(mainLambdaTrace);
+    }
+    
+    public QLResult execute(LoadedParseCache cache, ExpressContext context, QLOptions qlOptions) {
+        return executeLambdaTrace(parseToLambda(cache, context, qlOptions));
+    }
+    
+    public QLResult execute(SerializableParseCache cache, ExpressContext context, QLOptions qlOptions) {
+        return execute(loadSerializableCache(cache), context, qlOptions);
+    }
+    
+    public QLResult execute(SerializableParseCache cache, Map<String, Object> context, QLOptions qlOptions) {
+        return execute(cache, new MapExpressContext(context), qlOptions);
+    }
+    
+    private QLResult executeLambdaTrace(QLambdaTrace mainLambdaTrace) {
+        QLambda mainLambda = mainLambdaTrace.getqLambda();
+        try {
+            Object result;
+            if (initOptions.isDebug()) {
+                long start = System.currentTimeMillis();
+                result = mainLambda.call().getResult().get();
+                initOptions.getDebugInfoConsumer()
+                    .accept("Execute consume time: " + (System.currentTimeMillis() - start) + " ms");
+            }
+            else {
+                result = mainLambda.call().getResult().get();
+            }
+            
+            return new QLResult(result, mainLambdaTrace.getTraces().getExpressionTraces());
+        }
+        catch (QLException e) {
+            throw e;
+        }
+        catch (Throwable nuKnown) {
+            // should not run here
+            throw new RuntimeException(nuKnown);
+        }
+    }
+    
+    private QTraces convertPoints2QTraces(List<TracePointTree> expressionTracePoints) {
+        Map<Integer, ExpressionTrace> traceMap = new HashMap<>();
+        List<ExpressionTrace> expressionTraces = expressionTracePoints.stream()
+            .map(tracePoint -> convertPoint2Trace(tracePoint, traceMap))
+            .collect(Collectors.toList());
+        return new QTraces(expressionTraces, traceMap);
+    }
+    
+    private ExpressionTrace convertPoint2Trace(TracePointTree tree, Map<Integer, ExpressionTrace> traceMap) {
+        if (tree.getChildren().isEmpty()) {
+            ExpressionTrace result = new ExpressionTrace(tree.getType(), tree.getToken(), Collections.emptyList(),
+                tree.getLine(), tree.getCol(), tree.getPosition());
+            traceMap.put(result.getPosition(), result);
+            return result;
+        }
+        List<ExpressionTrace> mergedChildren =
+            tree.getChildren().stream().map(child -> convertPoint2Trace(child, traceMap)).collect(Collectors.toList());
+        ExpressionTrace result = new ExpressionTrace(tree.getType(), tree.getToken(), mergedChildren, tree.getLine(),
+            tree.getCol(), tree.getPosition());
+        traceMap.put(result.getPosition(), result);
+        return result;
+    }
+    
+    /**
+     * Get external variables (those that must be provided via context) referenced by the script.
+     *
+     * @param script the script content
+     * @return names of external variables referenced in the script
+     */
+    public Set<String> getOutVarNames(String script) {
+        QLParser.ProgramContext programContext = parseToSyntaxTree(script);
+        OutVarNamesVisitor outVarNamesVisitor = new OutVarNamesVisitor(inheritDefaultImport());
+        programContext.accept(outVarNamesVisitor);
+        return outVarNamesVisitor.getOutVars();
+    }
+    
+    /**
+     * Get external variable attribute access paths referenced by the script.
+     *
+     * @param script the script content
+     * @return attribute chains accessed on external variables
+     */
+    public Set<List<String>> getOutVarAttrs(String script) {
+        QLParser.ProgramContext programContext = parseToSyntaxTree(script);
+        OutVarAttrsVisitor outVarAttrsVisitor = new OutVarAttrsVisitor(inheritDefaultImport());
+        programContext.accept(outVarAttrsVisitor);
+        return outVarAttrsVisitor.getOutVarAttrs();
+    }
+    
+    /**
+     * Get external functions (those that must be provided via context) referenced by the script.
+     *
+     * @param script the script content
+     * @return names of external functions referenced in the script
+     */
+    public Set<String> getOutFunctions(String script) {
+        QLParser.ProgramContext programContext = parseToSyntaxTree(script);
+        OutFunctionVisitor outFunctionVisitor = new OutFunctionVisitor();
+        programContext.accept(outFunctionVisitor);
+        return outFunctionVisitor.getOutFunctions();
+    }
+    
+    /**
+     * Get the expression trace trees for the script without executing it.
+     *
+     * @param script the script content
+     * @return trace trees for each expression
+     */
+    public List<TracePointTree> getExpressionTracePoints(String script) {
+        QLParser.ProgramContext programContext = parseToSyntaxTree(script);
+        TraceExpressionVisitor traceExpressionVisitor = new TraceExpressionVisitor();
+        programContext.accept(traceExpressionVisitor);
+        return traceExpressionVisitor.getExpressionTracePoints();
+    }
+    
+    /**
+     * add user defined global macro to QLExpress engine
+     * @param name macro name
+     * @param macroScript script for macro
+     * @return true if add macro successfully. fail if macro name already exists.
+     */
+    public boolean addMacro(String name, String macroScript) {
+        return globalScope.defineMacroIfAbsent(name, parseMacroDefine(name, macroScript));
+    }
+    
+    /**
+     * add or replace user defined global macro to QLExpress engine
+     * @param name macro name
+     * @param macroScript script for macro
+     */
+    public void addOrReplaceMacro(String name, String macroScript) {
+        globalScope.defineMacro(name, parseMacroDefine(name, macroScript));
+    }
+    
+    private MacroDefine parseMacroDefine(String name, String macroScript) {
+        QLParser.ProgramContext macroProgram = parseToSyntaxTree(macroScript);
+        QvmInstructionVisitor macroVisitor = new QvmInstructionVisitor(macroScript, inheritDefaultImport(),
+            new GeneratorScope("MACRO_" + name, globalScope), operatorManager, QvmInstructionVisitor.Context.MACRO,
+            userDefineFunction, initOptions);
+        macroProgram.accept(macroVisitor);
+        List<QLInstruction> macroInstructions = macroVisitor.getInstructions();
+        List<QLParser.BlockStatementContext> blockStatementContexts = macroProgram.blockStatements().blockStatement();
+        boolean lastStmtExpress = !blockStatementContexts.isEmpty() && blockStatementContexts
+            .get(blockStatementContexts.size() - 1) instanceof QLParser.ExpressionStatementContext;
+        return new MacroDefine(macroInstructions, lastStmtExpress);
+    }
+    
+    /**
+     * add user defined function to QLExpress engine
+     * @param name function name
+     * @param function function definition
+     * @return true if add function successfully. fail if function name already exists.
+     */
+    public boolean addFunction(String name, CustomFunction function) {
+        CustomFunction preFunction = userDefineFunction.putIfAbsent(name, function);
+        return preFunction == null;
+    }
+    
+    public <T, R> boolean addFunction(String name, Function<T, R> function) {
+        return addFunction(name, (qContext, parameters) -> {
+            T t = parameters.size() > 0 ? (T)parameters.get(0).get() : null;
+            return function.apply(t);
+        });
+    }
+    
+    public boolean addVarArgsFunction(String name, QLFunctionalVarargs functionalVarargs) {
+        return addFunction(name, (qContext, parameters) -> {
+            Object[] paramArr = new Object[parameters.size()];
+            for (int i = 0; i < paramArr.length; i++) {
+                paramArr[i] = parameters.get(i).get();
+            }
+            return functionalVarargs.call(paramArr);
+        });
+    }
+    
+    public <T> boolean addFunction(String name, Predicate<T> predicate) {
+        return addFunction(name, (qContext, parameters) -> {
+            T t = parameters.size() > 0 ? (T)parameters.get(0).get() : null;
+            return predicate.test(t);
+        });
+    }
+    
+    public boolean addFunction(String name, Runnable runnable) {
+        return addFunction(name, (qContext, parameters) -> {
+            runnable.run();
+            return null;
+        });
+    }
+    
+    public <T> boolean addFunction(String name, Consumer<T> consumer) {
+        return addFunction(name, (qContext, parameters) -> {
+            T t = parameters.size() > 0 ? (T)parameters.get(0).get() : null;
+            consumer.accept(t);
+            return null;
+        });
+    }
+    
+    /**
+     * Add a user-defined function backed by a specific Java service instance method.
+     *
+     * @param name function name exposed in QLExpress scripts
+     * @param serviceObject target service instance, must not be {@code null}
+     * @param methodName Java method name on the service instance
+     * @param parameterClassTypes parameter type signature of the Java method; use an empty array for no-arg methods
+     * @return true if the function was added successfully; false if a function with the same name already exists
+     * @throws IllegalArgumentException if {@code serviceObject} or {@code methodName} is null, or if no matching
+     *                                  public method is found on the service type
+     */
+    public boolean addFunctionOfServiceMethod(String name, Object serviceObject, String methodName,
+        Class<?>[] parameterClassTypes) {
+        if (serviceObject == null) {
+            throw new IllegalArgumentException("serviceObject must not be null");
+        }
+        if (methodName == null) {
+            throw new IllegalArgumentException("methodName must not be null");
+        }
+        
+        Class<?>[] parameterTypes = parameterClassTypes == null ? new Class<?>[0] : parameterClassTypes;
+        Method method;
+        try {
+            method = serviceObject.getClass().getMethod(methodName, parameterTypes);
+        }
+        catch (NoSuchMethodException e) {
+            throw new IllegalArgumentException("No such public method '" + methodName + "' with parameter types "
+                + java.util.Arrays.toString(parameterTypes) + " on service object class '"
+                + serviceObject.getClass().getName() + "'", e);
+        }
+        
+        return addFunction(name, new QMethodFunction(serviceObject, method));
+    }
+    
+    /**
+     * execute `scriptWithFunctionDefine` and add functions defined in script
+     * @param scriptWithFunctionDefine script with function define
+     * @param context context when execute script
+     * @param qlOptions qlOptions when execute script
+     * @return succ and fail functions. fail if function name already exists
+     */
+    public BatchAddFunctionResult addFunctionsDefinedInScript(String scriptWithFunctionDefine, ExpressContext context,
+        QLOptions qlOptions) {
+        return addFunctionsDefinedInLambdaTrace(parseToLambda(scriptWithFunctionDefine, context, qlOptions));
+    }
+    
+    /**
+     * Execute a loaded serializable parse cache and add functions defined inside it.
+     * @param cache loaded serializable parse cache with function definitions
+     * @param context context when execute cache
+     * @param qlOptions qlOptions when execute cache
+     * @return succ and fail functions. fail if function name already exists
+     */
+    public BatchAddFunctionResult addFunctionsDefinedInScript(LoadedParseCache cache, ExpressContext context,
+        QLOptions qlOptions) {
+        return addFunctionsDefinedInLambdaTrace(parseToLambda(cache, context, qlOptions));
+    }
+    
+    /**
+     * Load and execute a serializable parse cache, then add functions defined inside it.
+     * @param cache serializable parse cache with function definitions
+     * @param context context when execute cache
+     * @param qlOptions qlOptions when execute cache
+     * @return succ and fail functions. fail if function name already exists
+     */
+    public BatchAddFunctionResult addFunctionsDefinedInScript(SerializableParseCache cache, ExpressContext context,
+        QLOptions qlOptions) {
+        return addFunctionsDefinedInLambdaTrace(parseToLambda(cache, context, qlOptions));
+    }
+    
+    private BatchAddFunctionResult addFunctionsDefinedInLambdaTrace(QLambdaTrace mainLambdaTrace) {
+        BatchAddFunctionResult batchResult = new BatchAddFunctionResult();
+        try {
+            Map<String, CustomFunction> functionTableInScript = mainLambdaTrace.getqLambda().getFunctionDefined();
+            for (Map.Entry<String, CustomFunction> entry : functionTableInScript.entrySet()) {
+                boolean addResult = addFunction(entry.getKey(), entry.getValue());
+                (addResult ? batchResult.getSucc() : batchResult.getFail()).add(entry.getKey());
+            }
+            return batchResult;
+        }
+        catch (QLException e) {
+            throw e;
+        }
+        catch (Throwable e) {
+            // should not run here
+            throw new RuntimeException(e);
+        }
+    }
+    
+    /**
+     * add object member method with annotation {@link com.alibaba.qlexpress4.annotation.QLFunction} as function
+     * @param object object with member method with annotation {@link com.alibaba.qlexpress4.annotation.QLFunction}
+     * @return succ and fail functions. fail if function name already exists or method is not public
+     */
+    public BatchAddFunctionResult addObjFunction(Object object) {
+        return addFunctionByAnnotation(object.getClass(), object);
+    }
+    
+    /**
+     * add class static method with annotation {@link com.alibaba.qlexpress4.annotation.QLFunction} as function
+     * @param clazz class with static method with annotation {@link com.alibaba.qlexpress4.annotation.QLFunction}
+     * @return succ and fail functions. fail if function name already exists or method is not public
+     */
+    public BatchAddFunctionResult addStaticFunction(Class<?> clazz) {
+        return addFunctionByAnnotation(clazz, null);
+    }
+    
+    private BatchAddFunctionResult addFunctionByAnnotation(Class<?> clazz, Object object) {
+        BatchAddFunctionResult result = new BatchAddFunctionResult();
+        Method[] methods = clazz.getDeclaredMethods();
+        for (Method method : methods) {
+            if (!BasicUtil.isPublic(method)) {
+                result.getFail().add(method.getName());
+                continue;
+            }
+            if (QLFunctionUtil.containsQLFunctionForMethod(method)) {
+                for (String functionName : QLFunctionUtil.getQLFunctionValue(method)) {
+                    boolean addResult = addFunction(functionName, new QMethodFunction(object, method));
+                    (addResult ? result.getSucc() : result.getFail()).add(method.getName());
+                }
+            }
+        }
+        return result;
+    }
+    
+    /**
+     * add extension function
+     * @param extensionFunction definition of extansion function
+     */
+    public void addExtendFunction(ExtensionFunction extensionFunction) {
+        this.reflectLoader.addExtendFunction(extensionFunction);
+    }
+    
+    /**
+     * add an extension function with variable arguments.
+     * @param name the name of the extension function
+     * @param bindingClass the receiver type (class)
+     * @param functionalVarargs custom logic
+     */
+    public void addExtendFunction(String name, Class<?> bindingClass, QLFunctionalVarargs functionalVarargs) {
+        this.reflectLoader.addExtendFunction(new ExtensionFunction() {
+            @Override
+            public Class<?>[] getParameterTypes() {
+                return new Class[] {Object[].class};
+            }
+            
+            @Override
+            public boolean isVarArgs() {
+                return true;
+            }
+            
+            @Override
+            public String getName() {
+                return name;
+            }
+            
+            @Override
+            public Class<?> getDeclaringClass() {
+                return bindingClass;
+            }
+            
+            @Override
+            public Object invoke(Object obj, Object[] args)
+                throws InvocationTargetException, IllegalAccessException {
+                Object[] varArgs = (Object[])args[0];
+                Object[] extArgs = new Object[varArgs.length + 1];
+                extArgs[0] = obj;
+                System.arraycopy(varArgs, 0, extArgs, 1, varArgs.length);
+                return functionalVarargs.call(extArgs);
+            }
+        });
+    }
+    
+    public QLParser.ProgramContext parseToSyntaxTree(String script) {
+        return SyntaxTreeFactory.buildTree(script,
+            operatorManager,
+            initOptions.isDebug(),
+            initOptions.getDebugInfoConsumer(),
+            initOptions.getInterpolationMode(),
+            initOptions.getSelectorStart(),
+            initOptions.getSelectorEnd(),
+            initOptions.isStrictNewLines());
+    }
+    
+    public void check(String script, CheckOptions checkOptions)
+        throws QLSyntaxException {
+        // 1. Parse syntax tree (reuse existing parseToSyntaxTree logic)
+        QLParser.ProgramContext programContext = parseToSyntaxTree(script);
+        
+        // 2. Create CheckVisitor and pass validation configuration and script content
+        CheckVisitor checkVisitor = new CheckVisitor(checkOptions, script);
+        
+        // 3. Traverse syntax tree and perform operator validation during traversal
+        programContext.accept(checkVisitor);
+    }
+    
+    public void check(String script)
+        throws QLSyntaxException {
+        check(script, CheckOptions.DEFAULT_OPTIONS);
+    }
+    
+    public QLambdaTrace parseToLambda(String script, ExpressContext context, QLOptions qlOptions) {
+        QCompileCache mainLambdaDefine =
+            qlOptions.isCache() ? parseToDefinitionWithCache(script) : parseDefinition(script);
+        return parseToLambda(mainLambdaDefine, context, qlOptions, true);
+    }
+    
+    public SerializableParseCache parseToSerializableCache(String script) {
+        QCompileCache mainLambdaDefine = parseDefinition(script);
+        return new SerializableParseCacheExporter(script, operatorManager, initOptions.isTraceExpression())
+            .export(mainLambdaDefine);
+    }
+    
+    public LoadedParseCache loadSerializableCache(SerializableParseCache cache) {
+        return new SerializableParseCacheImporter(operatorManager, initOptions.getClassSupplier()).load(cache, this);
+    }
+    
+    public QLambdaTrace parseToLambda(LoadedParseCache cache, ExpressContext context, QLOptions qlOptions) {
+        if (!cache.isBoundTo(this)) {
+            throw new SerializableParseCacheException(cache.getScript(), null,
+                QLErrorCodes.SERIALIZABLE_PARSE_CACHE_INVALID_MODEL.name(),
+                String.format(QLErrorCodes.SERIALIZABLE_PARSE_CACHE_INVALID_MODEL.getErrorMsg(),
+                    "LoadedParseCache is bound to another Express4Runner"));
+        }
+        return parseToLambda(cache.getCompileCache(), context, qlOptions, cache.hasTracePoints());
+    }
+    
+    public QLambdaTrace parseToLambda(SerializableParseCache cache, ExpressContext context, QLOptions qlOptions) {
+        return parseToLambda(loadSerializableCache(cache), context, qlOptions);
+    }
+    
+    private QLambdaTrace parseToLambda(QCompileCache mainLambdaDefine, ExpressContext context, QLOptions qlOptions,
+        boolean tracePointsAvailable) {
+        if (initOptions.isDebug()) {
+            initOptions.getDebugInfoConsumer().accept("\nInstructions:");
+            mainLambdaDefine.getQLambdaDefinition().println(0, initOptions.getDebugInfoConsumer());
+        }
+        
+        QTraces qTraces = initOptions.isTraceExpression() && qlOptions.isTraceExpression() && tracePointsAvailable
+            ? convertPoints2QTraces(mainLambdaDefine.getExpressionTracePoints())
+            : new QTraces(null, null);
+        
+        QvmRuntime qvmRuntime =
+            new QvmRuntime(qTraces, qlOptions.getAttachments(), reflectLoader, System.currentTimeMillis());
+        QvmGlobalScope globalScope = new QvmGlobalScope(context, userDefineFunction, qlOptions);
+        QLambda qLambda = mainLambdaDefine.getQLambdaDefinition()
+            .toLambda(new DelegateQContext(qvmRuntime, globalScope), qlOptions, true);
+        return new QLambdaTrace(qLambda, qTraces);
+    }
+    
+    /**
+     * parse script with cache
+     * @param script script to parse
+     * @return QLambdaDefinition and TracePointTrees
+     */
+    public QCompileCache parseToDefinitionWithCache(String script) {
+        try {
+            return getParseFuture(script).get();
+        }
+        catch (Exception e) {
+            Throwable compileException = e.getCause();
+            throw compileException instanceof QLSyntaxException ? (QLSyntaxException)compileException
+                : new RuntimeException(compileException);
+        }
+    }
+    
+    public Value loadField(Object object, String fieldName) {
+        return reflectLoader.loadField(object, fieldName, true, PureErrReporter.INSTANCE);
+    }
+    
+    /**
+     * Clear the compilation cache.
+     * This method clears the cache that stores compiled scripts for performance optimization.
+     * When the cache is cleared, subsequent script executions will need to recompile the scripts,
+     * which may temporarily impact performance until the cache is rebuilt.
+     */
+    public void clearCompileCache() {
+        compileCache.clear();
+    }
+    
+    private Future<QCompileCache> getParseFuture(String script) {
+        Future<QCompileCache> parseFuture = compileCache.get(script);
+        if (parseFuture != null) {
+            return parseFuture;
+        }
+        FutureTask<QCompileCache> parseTask = new FutureTask<>(() -> parseDefinition(script));
+        Future<QCompileCache> preTask = compileCache.putIfAbsent(script, parseTask);
+        if (preTask == null) {
+            parseTask.run();
+            return parseTask;
+        }
+        return preTask;
+    }
+    
+    private QCompileCache parseDefinition(String script) {
+        QLParser.ProgramContext program = parseToSyntaxTree(script);
+        QvmInstructionVisitor qvmInstructionVisitor = new QvmInstructionVisitor(script, inheritDefaultImport(),
+            globalScope, operatorManager, userDefineFunction, initOptions);
+        program.accept(qvmInstructionVisitor);
+        
+        QLambdaDefinitionInner qLambdaDefinition = new QLambdaDefinitionInner("main",
+            qvmInstructionVisitor.getInstructions(), Collections.emptyList(), qvmInstructionVisitor.getMaxStackSize());
+        if (initOptions.isTraceExpression()) {
+            TraceExpressionVisitor traceExpressionVisitor = new TraceExpressionVisitor();
+            program.accept(traceExpressionVisitor);
+            List<TracePointTree> tracePoints = traceExpressionVisitor.getExpressionTracePoints();
+            return new QCompileCache(qLambdaDefinition, tracePoints);
+        }
+        else {
+            return new QCompileCache(qLambdaDefinition, Collections.emptyList());
+        }
+    }
+    
+    private ImportManager inheritDefaultImport() {
+        return new ImportManager(initOptions.getClassSupplier(), initOptions.getDefaultImport());
+    }
+    
+    public <T, U, R> boolean addOperatorBiFunction(String operator, BiFunction<T, U, R> biFunction) {
+        return operatorManager.addBinaryOperator(operator,
+            (left, right) -> biFunction.apply((T)left.get(), (U)right.get()),
+            QLPrecedences.MULTI);
+    }
+    
+    public boolean addOperator(String operator, QLFunctionalVarargs functionalVarargs) {
+        return addOperator(operator, (left, right) -> functionalVarargs.call(left.get(), right.get()));
+    }
+    
+    /**
+     * add operator with multi precedences
+     * @param operator operator name
+     * @param customBinaryOperator operator implement
+     * @return true if add operator successfully; false if operator already exist
+     */
+    public boolean addOperator(String operator, CustomBinaryOperator customBinaryOperator) {
+        return operatorManager.addBinaryOperator(operator, customBinaryOperator, QLPrecedences.MULTI);
+    }
+    
+    /**
+     * add operator
+     * @param operator operator name
+     * @param customBinaryOperator operator implement
+     * @param precedence precedence, see {@link QLPrecedences}
+     * @return true if add operator successfully; false if operator already exist
+     */
+    public boolean addOperator(String operator, CustomBinaryOperator customBinaryOperator, int precedence) {
+        return operatorManager.addBinaryOperator(operator, customBinaryOperator, precedence);
+    }
+    
+    /**
+     * @param operator operator name
+     * @param customBinaryOperator operator implement
+     * @return true if replace operator successfully; false if default operator not exists
+     */
+    public boolean replaceDefaultOperator(String operator, CustomBinaryOperator customBinaryOperator) {
+        return operatorManager.replaceDefaultOperator(operator, customBinaryOperator);
+    }
+    
+    /**
+     * add alias for keyWord, operator and function
+     * @param alias must be a valid id
+     * @param originToken key word in qlexpress
+     * @return true if add alias successfully
+     */
+    public boolean addAlias(String alias, String originToken) {
+        boolean addKeyWordAliasResult = operatorManager.addKeyWordAlias(alias, originToken);
+        boolean addOperatorAliasResult = operatorManager.addOperatorAlias(alias, originToken);
+        boolean addFunctionAliasResult = addFunctionAlias(alias, originToken);
+        
+        return addKeyWordAliasResult || addOperatorAliasResult || addFunctionAliasResult;
+    }
+    
+    private boolean addFunctionAlias(String alias, String originToken) {
+        CustomFunction customFunction = userDefineFunction.get(originToken);
+        if (customFunction != null) {
+            return userDefineFunction.putIfAbsent(alias, customFunction) == null;
+        }
+        return false;
+    }
+}
